@@ -72,7 +72,9 @@ const notified = [];
 // sends 64 KB every 20 ms (a fast channel, for a viewer that falls behind).
 // Ids in live.bursty send only in the first 40 ms of every 400 ms, like a provider that delivers
 // a channel segment by segment.
-const live = { open: new Map(), requests: 0, paused: new Set(), bursty: new Set() };
+// Ids in live.doubled do the same but skip every third burst (gaps of 360 and 760 ms), like a provider
+// that now and then sends two bursts together.
+const live = { open: new Map(), requests: 0, paused: new Set(), bursty: new Set(), doubled: new Set() };
 
 const xmltvTime = (d) => d.toISOString().replace(/[-:T]/g, '').slice(0, 14) + ' +0000';
 function guide(ids) {
@@ -181,6 +183,7 @@ function startUpstream() {
       const fat = liveId === '958' ? Buffer.alloc(65536, 0x47) : null;
       const timer = setInterval(() => {
         if (live.paused.has(liveId) || (live.bursty.has(liveId) && Date.now() % 400 >= 40)) return;
+        if (live.doubled.has(liveId) && (Date.now() % 400 >= 40 || Math.floor(Date.now() / 400) % 3 === 0)) return;
         res.write(fat || `chunk-${liveId};`);
       }, 20);
       res.on('close', () => {
@@ -1558,6 +1561,19 @@ test('stall diagnostics: provider pauses and viewers falling behind, on the dash
     await until(async () => (await row('Pausing')).health.provider_pauses === 2, 'a gap well past the rhythm is');
     assert.ok(logs.some((l) => l.startsWith('Stream "Pausing": the provider sent nothing for') && l.includes('it usually sends every ~1 s; 2nd pause')), logs.join('\n'));
     live.bursty.delete('957');
+
+    // Now and then two bursts together (a gap twice the usual): part of how the channel comes, not
+    // a pause, once learned. A long silence still is one.
+    live.doubled.add('957');
+    await new Promise((res) => setTimeout(res, 5000)); // learning (three double-length gaps)
+    const learned = (await row('Pausing')).health.provider_pauses;
+    await new Promise((res) => setTimeout(res, 4000));
+    assert.equal((await row('Pausing')).health.provider_pauses, learned, 'the double-length gaps are no longer pauses');
+    live.paused.add('957');
+    await new Promise((res) => setTimeout(res, 2500));
+    live.paused.delete('957');
+    await until(async () => (await row('Pausing')).health.provider_pauses === learned + 1, 'a long silence still is');
+    live.doubled.delete('957');
     reading = false;
     ac.abort();
 

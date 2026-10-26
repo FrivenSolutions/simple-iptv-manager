@@ -136,15 +136,28 @@ class Hub {
    * a stall.
    */
   rhythm() {
-    if (this.gaps.length < 3) return 0;
-    const sorted = [...this.gaps].sort((a, b) => a - b);
-    return sorted[Math.floor(sorted.length / 2)];
+    return this.gapAt(0.5);
   }
 
-  /** A gap this long is a pause: well past the usual rhythm, and never under stallMs. */
+  /**
+   * The longer gaps this stream routinely has (90th percentile), 0 until 3 gaps are seen. Many
+   * providers now and then skip a burst and send two next time: a gap of twice the rhythm that's
+   * part of how the channel is delivered, and that a player's buffer rides out.
+   */
+  usualLong() {
+    return this.gapAt(0.9);
+  }
+
+  gapAt(q) {
+    if (this.gaps.length < 3) return 0;
+    const sorted = [...this.gaps].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
+  }
+
+  /** A gap this long is a pause: well past the longer gaps this stream usually has, and never under stallMs. */
   pauseAfter() {
-    const r = this.rhythm();
-    return r ? Math.max(this.streams.stallMs, 1.5 * r) : BOOTSTRAP_FACTOR * this.streams.stallMs;
+    const long = this.usualLong();
+    return long ? Math.max(this.streams.stallMs, 1.5 * long) : BOOTSTRAP_FACTOR * this.streams.stallMs;
   }
 
   /**
@@ -239,16 +252,22 @@ class Hub {
         const now = Date.now();
         if (this.lastData) {
           const gap = now - this.lastData;
+          const r = this.rhythm();
           if (gap >= this.pauseAfter()) {
             this.pauses++;
             this.longestPause = Math.max(this.longestPause, gap);
-            const r = this.rhythm();
-            const usual = r >= 2 * this.streams.burstMinMs() ? `it usually sends every ~${Math.max(1, Math.round(r / 1000))} s; ` : '';
-            log(`Stream "${this.ch.name}": the provider sent nothing for ${Math.max(1, Math.round(gap / 1000))} s (${usual}${ordinal(this.pauses)} pause in ${mins()} min)`);
-          } else if (gap >= this.streams.burstMinMs()) {
-            // A gap between bursts: part of the rhythm (the last 9 are kept).
+            const secs = (ms) => Math.max(1, Math.round(ms / 1000));
+            const long = this.usualLong();
+            const usual = r >= 2 * this.streams.burstMinMs()
+              ? `it usually sends every ~${secs(r)} s${long >= 1.5 * r ? `, sometimes ~${secs(long)} s` : ''}; ` : '';
+            log(`Stream "${this.ch.name}": the provider sent nothing for ${secs(gap)} s (${usual}${ordinal(this.pauses)} pause in ${mins()} min)`);
+          }
+          // Gaps between bursts are learned (the last 20), including the occasional double-length
+          // ones, so a stream's normal pattern stops counting as pauses. Gaps far past the rhythm
+          // (3 times or more) are real trouble and don't teach it anything.
+          if (gap >= this.streams.burstMinMs() && (r ? gap < 3 * r : gap < this.pauseAfter())) {
             this.gaps.push(gap);
-            if (this.gaps.length > 9) this.gaps.shift();
+            if (this.gaps.length > 20) this.gaps.shift();
           }
         }
         this.lastData = now;

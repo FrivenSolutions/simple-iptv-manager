@@ -620,7 +620,7 @@ stored; it lives in memory.
 | Shown | Whose side | Logged as |
 |---|---|---|
 | *provider sends in ~6 s bursts* (no ⚠) | Not a problem by itself: the provider delivers a few seconds at a time, usually from HLS segments. A bigger player buffer, or HLS in the player, rides it out | — |
-| *provider silent for 16 s*, *provider paused 3× (longest 18 s)* | The provider: a gap well past its usual rhythm (1.5×, and at least 5 s; 15 s until the rhythm is known) | `the provider sent nothing for 18 s (it usually sends every ~6 s; 3rd pause in 42 min)` |
+| *provider silent for 20 s*, *provider paused 3× (longest 22 s)* | The provider: a gap well past the longer gaps the channel routinely has (1.5×, and at least 5 s; 15 s until its pattern is known). Many providers now and then send two bursts together, a gap twice the usual: that is learned as normal | `the provider sent nothing for 22 s (it usually sends every ~6 s, sometimes ~12 s; 3rd pause in 42 min)` |
 | *viewer 4.2 MB behind* | That device or its network can't take the stream as fast as it comes | `<who> (<address>) is 4 MB behind`, then `dropped …` at 16 MB |
 | *encoder 3.1 MB behind* | Light streams: ffmpeg can't keep up (too many for this server?) | `the light-stream encoder (ffmpeg) is … MB behind` |
 
