@@ -9,6 +9,7 @@ import zlib from 'node:zlib';
 import { download, fetchJson, isFetchInternalError } from '../src/fetch.js';
 import { clientAddress, trustedProxies, isPrivateAddress, Attempts } from '../src/guard.js';
 import { TsProbe } from '../src/tsprobe.js';
+import { behindOf } from '../src/streams.js';
 import { readGitCommit, currentVersion } from '../src/version.js';
 import { parseM3U, isVod } from '../src/m3u.js';
 import { parseXmltv, parseXmltvTime } from '../src/xmltv.js';
@@ -353,4 +354,18 @@ test('TsProbe reads the codecs from the PAT and PMT, and judges what needs conve
   assert.deepEqual(probe([{ type: 0x03 }]), { video: null, audio: 'mp2', convert: false }, 'radio is left alone');
   assert.deepEqual(probe([{ type: 0x1b }]), { video: 'h264', audio: null, convert: false });
   assert.equal(new TsProbe().push(Buffer.from('not a transport stream at all, just text '.repeat(40))), null);
+});
+
+test('behindOf: what a joiner was handed as its cushion is not lag, until it has gone', () => {
+  const res = { writableLength: 12_000_000, iptvmReplay: 12_000_000 };
+  assert.equal(behindOf(res), 0, 'all of it is the replayed cushion');
+  res.writableLength = 13_000_000; // a new chunk queued behind it
+  assert.equal(behindOf(res), 1_000_000);
+  res.writableLength = 3_000_000; // the cushion is mostly sent: what's left of it is at the front
+  assert.equal(behindOf(res), 0);
+  assert.equal(res.iptvmReplay, 3_000_000);
+  res.writableLength = 5_000_000;
+  assert.equal(behindOf(res), 2_000_000);
+  assert.equal(behindOf({ writableLength: 700 }), 700, 'a viewer that got no cushion');
+  assert.equal(behindOf(null), 0);
 });

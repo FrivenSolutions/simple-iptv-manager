@@ -9,8 +9,39 @@ import { TsProbe } from './tsprobe.js';
 // The codecs are read from the first this-many bytes of a stream at most (the tables repeat
 // several times a second, so they're usually in the first few KB).
 const PROBE_BYTES = 2 * 1024 * 1024;
-// At most this much of a stream's start is kept for the first viewer to join.
-const EARLY_BYTES = 8 * 1024 * 1024;
+// Each shared stream keeps what it received in the last REPLAY_MS (at most REPLAY_BYTES), and
+// whoever joins gets that first. A provider's opening burst (often half a minute of video sent in
+// a few seconds) is the cushion that lets a player ride out a bursty channel's gaps; a viewer who
+// joins a stream already open (a reconnect, a second window, a light copy or a recorder) would
+// otherwise start at the live point with nothing in its buffer. It also gives a recording or
+// player that joins after a codec check the stream's start, which begins on a whole picture.
+const REPLAY_MS = 12_000;
+const REPLAY_BYTES = 12 * 1024 * 1024;
+// When every viewer on a stream has this much waiting, stop reading from the provider until one
+// catches up, so the provider holds the rest, as it does when a player connects to it directly
+// (Redirect). Without this the proxy read a provider's opening burst (half a minute of video in a
+// few seconds) as fast as it came, and a TV that couldn't take it as fast fell 16 MB behind and
+// was cut off, losing that cushion.
+const PAUSE_AT_BYTES = 8 * 1024 * 1024;
+
+/** Resolves when any of these clients has sent what was waiting (or closed), or after ms. */
+function anyDrained(clients, ms) {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      for (const c of clients) {
+        c.off('drain', done);
+        c.off('close', done);
+      }
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    for (const c of clients) {
+      c.once('drain', done);
+      c.once('close', done);
+    }
+  });
+}
 
 // An HLS channel counts as open this long after its last playlist or segment request.
 const HLS_IDLE_MS = 30_000;
@@ -28,6 +59,17 @@ const BOOTSTRAP_FACTOR = 3;
 const LAG_SHOW_BYTES = 2 * 1024 * 1024;
 const LAG_LOG_BYTES = 4 * 1024 * 1024;
 const LAG_SUSTAIN_MS = 5000;
+/**
+ * How far a client is behind the live point: what is queued for it, less what it was handed on
+ * joining (the replayed cushion, queued first) and hasn't received yet. That part is meant to be
+ * there and isn't lag.
+ */
+export function behindOf(res) {
+  if (!res) return 0;
+  if (res.iptvmReplay) res.iptvmReplay = Math.min(res.iptvmReplay, res.writableLength);
+  return res.writableLength - (res.iptvmReplay || 0);
+}
+
 const mb = (n) => Math.round((n / 1048576) * 10) / 10;
 const ordinal = (n) => {
   const teen = n % 100 >= 11 && n % 100 <= 13;
@@ -78,8 +120,8 @@ class Hub {
     this.gaps = []; // recent gaps between bursts (not pauses), to learn the provider's rhythm
     // Kept open without viewers while something is about to join (codec check, ffmpeg starting).
     this.holds = 0;
-    this.early = []; // the stream's start, read while held open with nobody on it
-    this.earlyBytes = 0;
+    this.recent = []; // [{ at, chunk }]: the last REPLAY_MS of the stream, for whoever joins
+    this.recentBytes = 0;
     // The stream's codecs (tsprobe.js), read from its first bytes; codecs resolves to them, or
     // null if they weren't found (not MPEG-TS, or the stream ended first).
     this.probe = new TsProbe();
@@ -147,6 +189,17 @@ class Hub {
     return { ts: ct || 'video/mp2t' };
   }
 
+  /** Keeps the last REPLAY_MS of the stream (at most REPLAY_BYTES) for whoever joins next. */
+  remember(chunk) {
+    const now = Date.now();
+    this.recent.push({ at: now, chunk });
+    this.recentBytes += chunk.length;
+    const { replayMs, replayBytes } = this.streams;
+    while (this.recent.length > 1 && (this.recentBytes > replayBytes || now - this.recent[0].at > replayMs)) {
+      this.recentBytes -= this.recent.shift().chunk.length;
+    }
+  }
+
   /** Reads the codecs from the stream's first bytes, then stops looking. */
   sniff(chunk) {
     this.probed += chunk.length;
@@ -159,9 +212,8 @@ class Hub {
   }
 
   add(res) {
-    for (const chunk of this.early) res.write(chunk);
-    this.early = [];
-    this.earlyBytes = 0;
+    for (const { chunk } of this.recent) res.write(chunk);
+    res.iptvmReplay = this.recentBytes;
     this.clients.add(res);
     res.on('close', () => {
       this.clients.delete(res);
@@ -180,15 +232,10 @@ class Hub {
         // everyone who asked has gone.
         if (!this.clients.size && !this.holds) break;
         if (this.probe) this.sniff(chunk);
-        // Held open with nobody on it yet (codecs being read, ffmpeg starting): keep the start of
-        // the stream for whoever joins first. It usually begins on a whole picture, which a
-        // recording or a player needs; joining later would start mid-picture.
-        if (!this.clients.size) {
-          this.early.push(chunk);
-          this.earlyBytes += chunk.length;
-          while (this.earlyBytes > EARLY_BYTES && this.early.length > 1) this.earlyBytes -= this.early.shift().length;
-          continue;
-        }
+        this.remember(chunk);
+        // Held open with nobody on it yet (codecs being read, ffmpeg starting): what arrives is
+        // kept (above) for whoever joins first.
+        if (!this.clients.size) continue;
         const now = Date.now();
         if (this.lastData) {
           const gap = now - this.lastData;
@@ -208,21 +255,22 @@ class Hub {
         const maxBehind = this.streams.maxBehindBytes;
         for (const res of this.clients) {
           const who = res.iptvmWho || 'a viewer';
+          const behind = behindOf(res);
           // The light-stream encoder runs faster than real time, but not as fast as a provider's
           // opening burst (it can send half a minute of video at once). Rather than stop the light
           // copy, skip ahead to live: feed it nothing until it is down to a quarter, then go on.
-          if (res.iptvmEncoder && (res.writableLength > maxBehind || (res.iptvmSkipping && res.writableLength > maxBehind / 4))) {
+          if (res.iptvmEncoder && (behind > maxBehind || (res.iptvmSkipping && behind > maxBehind / 4))) {
             if (!res.iptvmSkipping) {
               res.iptvmSkipping = true;
               if (!res.iptvmSkipLogged) {
                 res.iptvmSkipLogged = true;
-                log(`Stream "${this.ch.name}": the light-stream encoder fell ${mb(res.writableLength)} MB behind (a burst from the provider); skipping ahead to live, after ${mins()} min`);
+                log(`Stream "${this.ch.name}": the light-stream encoder fell ${mb(behind)} MB behind (a burst from the provider); skipping ahead to live, after ${mins()} min`);
               }
             }
             continue;
           }
           res.iptvmSkipping = false;
-          if (res.writableLength > maxBehind) {
+          if (behind > maxBehind) {
             log(`Stream "${this.ch.name}": dropped ${who} that fell ${Math.round(maxBehind / 1048576)} MB behind, after ${mins()} min`);
             // Out of the set now, not on its close event, so the next chunks don't log it again.
             this.clients.delete(res);
@@ -230,14 +278,21 @@ class Hub {
             continue;
           }
           // Since when this client has been behind; cleared as soon as it catches up.
-          if (res.writableLength >= this.streams.lagShowBytes) res.iptvmBehindSince ??= now;
+          if (behind >= this.streams.lagShowBytes) res.iptvmBehindSince ??= now;
           else res.iptvmBehindSince = null;
           const behindFor = res.iptvmBehindSince == null ? 0 : now - res.iptvmBehindSince;
-          if (behindFor >= this.streams.lagSustainMs && res.writableLength > this.streams.lagLogBytes && !res.iptvmLagLogged) {
+          if (behindFor >= this.streams.lagSustainMs && behind > this.streams.lagLogBytes && !res.iptvmLagLogged) {
             res.iptvmLagLogged = true;
-            log(`Stream "${this.ch.name}": ${who} has been behind for ${Math.round(behindFor / 1000)} s, now ${mb(res.writableLength)} MB (${res.iptvmEncoder ? 'the encoder' : 'their device or network'} is not keeping up), after ${mins()} min`);
+            log(`Stream "${this.ch.name}": ${who} has been behind for ${Math.round(behindFor / 1000)} s, now ${mb(behind)} MB (${res.iptvmEncoder ? 'the encoder' : 'their device or network'} is not keeping up), after ${mins()} min`);
           }
           res.write(chunk);
+        }
+        // All viewers (light-stream encoders aside: they skip ahead) have plenty waiting: let the
+        // provider hold the rest until one of them catches up. Not counted as a provider pause.
+        const viewers = [...this.clients].filter((c) => !c.iptvmEncoder);
+        if (viewers.length && viewers.every((c) => behindOf(c) >= this.streams.pauseAtBytes)) {
+          await anyDrained(viewers, 10_000);
+          this.lastData = Date.now();
         }
       }
     } catch (e) {
@@ -276,6 +331,9 @@ export class Streams {
     this.lagLogBytes = LAG_LOG_BYTES;
     this.lagSustainMs = LAG_SUSTAIN_MS;
     this.maxBehindBytes = MAX_BEHIND_BYTES;
+    this.replayMs = REPLAY_MS;
+    this.replayBytes = REPLAY_BYTES;
+    this.pauseAtBytes = PAUSE_AT_BYTES;
   }
 
   /**
@@ -300,7 +358,7 @@ export class Streams {
 
   /** How far behind a client is, in MB: 0 unless it has been over the threshold for a while. */
   behindMb(res) {
-    const n = res?.writableLength || 0;
+    const n = behindOf(res);
     const since = res?.iptvmBehindSince;
     return n >= this.lagShowBytes && since != null && Date.now() - since >= this.lagSustainMs ? mb(n) : 0;
   }

@@ -1741,6 +1741,82 @@ test('Convert for playback: only channels in codecs that don\'t play everywhere 
   }
 });
 
+test('a viewer joining a channel already open gets its last seconds first (a cushion), without counting as behind', async () => {
+  const o = (await api('POST', '/api/outputs', { name: 'Late' })).data;
+  await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy', source_ids: [xcId], rules: [{ action: 'include', op: 'equals', value: 'us| live' }] });
+  const text = await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text();
+  const url = text.split('\n')[text.split('\n').findIndex((l) => l.endsWith(',Live 2')) + 1];
+  const { streams } = app.ctx;
+  const saved = streams.maxBehindBytes;
+  const open = async () => {
+    const ac = new AbortController();
+    const r = await fetch(url, { signal: ac.signal });
+    const reader = r.body.getReader();
+    return { reader, stop: () => { ac.abort(); reader.cancel().catch(() => {}); } };
+  };
+  // Everything a reader got within `ms`.
+  const take = async (reader, ms) => {
+    let n = 0;
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const r = await Promise.race([reader.read(), new Promise((res) => setTimeout(() => res(null), end - Date.now()))]);
+      if (!r || r.done) break;
+      n += r.value.length;
+    }
+    return n;
+  };
+  try {
+    const a = await open();
+    (async () => { for (;;) { const { done } = await a.reader.read().catch(() => ({ done: true })); if (done) break; } })();
+    await new Promise((res) => setTimeout(res, 1500)); // ~750 bytes of "chunk-951;" go by
+    // A drop limit far below what is replayed: the cushion mustn't count as falling behind.
+    streams.maxBehindBytes = 100;
+    const b = await open();
+    const got = await take(b.reader, 150);
+    assert.ok(got >= 500, `the joiner got the recent stream at once (${got} bytes), not just the live point`);
+    await new Promise((res) => setTimeout(res, 300));
+    const more = await take(b.reader, 300);
+    assert.ok(more > 0, 'and keeps receiving: not dropped for the cushion');
+    a.stop();
+    b.stop();
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal(live.open.get('951'), 0);
+  } finally {
+    streams.maxBehindBytes = saved;
+    await api('DELETE', `/api/outputs/${o.id}`);
+  }
+});
+
+test('a lone viewer that stops reading makes the proxy wait (the provider holds the rest, as with Redirect), not cut it off', async () => {
+  const o = (await api('POST', '/api/outputs', { name: 'Patient' })).data;
+  await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy', source_ids: [xcId], rules: [{ action: 'include', op: 'equals', value: 'us| checks' }] });
+  const text = await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text();
+  const url = text.split('\n')[text.split('\n').findIndex((l) => l.endsWith(',Fast')) + 1];
+  const { streams } = app.ctx;
+  const saved = [streams.maxBehindBytes, streams.pauseAtBytes, app.ctx.log];
+  const logs = [];
+  app.ctx.log = (m) => logs.push(m);
+  // Waits at 256 KB; would be cut off at 2 MB. The channel sends 3.2 MB a second.
+  Object.assign(streams, { maxBehindBytes: 2 * 1024 * 1024, pauseAtBytes: 256 * 1024 });
+  try {
+    const req = http.get(url, (res) => res.pause()); // a TV whose buffer is full: reads nothing
+    req.on('error', () => {});
+    await new Promise((res) => setTimeout(res, 4000));
+    const hub = [...streams.hubs.values()].find((x) => x.ch.name === 'Fast');
+    assert.ok(hub && hub.clients.size === 1, 'still connected after 4 s (12 MB went by at the provider)');
+    const queued = [...hub.clients][0].writableLength;
+    assert.ok(queued < 2 * 1024 * 1024, `the proxy stopped reading instead of piling it up (${queued} bytes queued)`);
+    assert.ok(!logs.some((l) => l.includes('dropped')), logs.join('\n'));
+    assert.ok(!logs.some((l) => l.includes('provider sent nothing')), 'waiting on the viewer is not a provider pause');
+    req.destroy();
+    for (let i = 0; i < 100 && live.open.get('958') !== 0; i++) await new Promise((res) => setTimeout(res, 30));
+    assert.equal(live.open.get('958'), 0);
+  } finally {
+    [streams.maxBehindBytes, streams.pauseAtBytes, app.ctx.log] = saved;
+    await api('DELETE', `/api/outputs/${o.id}`);
+  }
+});
+
 test('a proxied stream the provider turns down is logged with why, once a minute, and shown on the source', async () => {
   const o = (await api('POST', '/api/outputs', { name: 'Refusals' })).data;
   await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy', source_ids: [xcId, m3uId], rules: [{ action: 'include', op: 'equals', value: 'us| news' }] });

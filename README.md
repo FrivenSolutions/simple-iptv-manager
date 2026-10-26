@@ -645,6 +645,13 @@ seconds after. The Sources list shows the streams in use. Direct and Redirect ca
 because players connect to the provider themselves. The Watch page and light streams always go
 through this server, so they count in any mode.
 
+**Buffering through the proxy.** Many providers send the first half minute of a channel in a
+few seconds; that backlog is what lets a player ride out a bursty channel's gaps. The proxy
+keeps it, as a direct connection would: a viewer who joins a channel that's already playing first
+gets its last ~12 seconds, and when every viewer on a channel has plenty waiting (8 MB), the proxy
+stops reading from the provider until one catches up, so the provider holds the rest instead of
+the player being cut off.
+
 ## Configuration
 
 | Variable | Default | Purpose |
