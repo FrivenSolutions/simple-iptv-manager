@@ -148,6 +148,42 @@ function shownName(x) {
   return shown === x.name ? shown : [shown, ' ', h('s', { class: 'old-name', title: 'The provider\'s name' }, x.name)];
 }
 
+/**
+ * A card whose heading folds it away; the browser remembers which are folded. note() says what's
+ * inside while it is folded, e.g. "3 rules".
+ */
+function foldCard(key, title, note, ...body) {
+  const store = `iptvm.fold.${key}`;
+  let folded = false;
+  try {
+    folded = localStorage.getItem(store) === '1';
+  } catch {}
+  const inner = h('div', { class: 'fold-body' }, ...body);
+  const arrow = h('span', { class: 'fold-arrow' });
+  const summary = h('span', { class: 'meta' });
+  const head = h('button', {
+    type: 'button',
+    class: 'fold-head',
+    onclick: () => {
+      folded = !folded;
+      try {
+        localStorage.setItem(store, folded ? '1' : '0');
+      } catch {}
+      draw();
+    },
+  }, arrow, h('h2', null, title), summary);
+  const draw = () => {
+    inner.hidden = folded;
+    arrow.textContent = folded ? '▸' : '▾';
+    head.setAttribute('aria-expanded', String(!folded));
+    summary.textContent = folded ? note() : '';
+  };
+  draw();
+  return h('section', { class: 'card' }, head, inner);
+}
+
+const ruleCount = (rules) => `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
+
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}` }, text);
 }
@@ -1280,8 +1316,7 @@ async function outputEditor(main, id) {
   const liveRules = rulesEditor(() => draft.rules, 'e.g. US|');
   const rulesBox = liveRules.box;
   const includeAll = h('input', { type: 'checkbox', checked: draft.include_all, onchange: (e) => { draft.include_all = e.target.checked; markDirty(); } });
-  const rulesCard = h('section', { class: 'card' },
-    h('h2', null, 'Filter rules'),
+  const rulesCard = foldCard('rules', 'Filter rules', () => ruleCount(draft.rules),
     h('p', { class: 'hint' }, 'Rules run against the provider\'s category names on every refresh, so new categories that match are added automatically. ',
       'A category is kept when it matches any Include rule and no Exclude rule. Picking a category by hand below always wins. ',
       'Drag rules (⠿) to arrange them; the order is only for your own organization.'),
@@ -1368,8 +1403,7 @@ async function outputEditor(main, id) {
   };
   const nameCount = o.name_rules.length;
   const namesCard = settings.advanced
-    ? h('section', { class: 'card' },
-      h('h2', null, 'Name cleanup'),
+    ? foldCard('names', 'Name cleanup', () => ruleCount(draft.name_rules),
       h('p', { class: 'hint' },
         'Tidy the names players show, like "US: Daily News ᴴᴰ" into "Daily News". Each rule\'s pattern is a regular expression (case-sensitive) ',
         'and every match is replaced; rules run top to bottom, then leftover spaces are tidied. Names you set by hand are never changed. ',
@@ -2083,8 +2117,7 @@ async function outputEditor(main, id) {
     const bulk = (value) => () => setOverride(visible().map((c) => c.id), value);
     const el = h('div', { hidden: true },
       notice,
-      h('section', { class: 'card' },
-        h('h2', null, `${L.title} rules`),
+      foldCard(`rules-${kind}`, `${L.title} rules`, () => ruleCount(draft.vod_rules[kind]),
         h('p', { class: 'hint' },
           `Rules run against the provider's ${L.title.toLowerCase()} category names on every refresh, so new categories that match are added automatically. `,
           'A category is kept when it matches any Include rule and no Exclude rule. Picking a category by hand below always wins.'),
