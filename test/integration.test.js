@@ -1866,6 +1866,98 @@ test('rules go by the provider\'s names, whatever name cleanup, renames and pref
   }
 });
 
+test('sorting: categories within a source and channels within a category, by the names players see or by hand, in everything published', async () => {
+  xcCats.push({ category_id: '41', category_name: 'ZZ| ALPHA' }, { category_id: '42', category_name: 'AA| OMEGA' }, { category_id: '43', category_name: 'MM| MIDDLE' });
+  xcStreams.push(
+    { num: 201, name: 'AA: Zebra', stream_id: 2001, stream_icon: '', epg_channel_id: '', category_id: '41' },
+    { num: 202, name: 'ZZ: Apple', stream_id: 2002, stream_icon: '', epg_channel_id: '', category_id: '41' },
+    { num: 203, name: 'MM: Channel 10', stream_id: 2003, stream_icon: '', epg_channel_id: '', category_id: '41' },
+    { num: 204, name: 'MM: Channel 2', stream_id: 2004, stream_icon: '', epg_channel_id: '', category_id: '41' },
+    { num: 205, name: 'Omega One', stream_id: 2005, stream_icon: '', epg_channel_id: '', category_id: '42' },
+    { num: 206, name: 'Middle One', stream_id: 2006, stream_icon: '', epg_channel_id: '', category_id: '43' },
+  );
+  await api('POST', `/api/sources/${xcId}/refresh`);
+  await app.ctx.jobs.idle();
+  const o = (await api('POST', '/api/outputs', { name: 'Sorted' })).data;
+  await api('PUT', `/api/outputs/${o.id}`, {
+    source_ids: [xcId], number_start: 100, xc_enabled: true, xc_username: 'sorted', xc_password: 'sp',
+    rules: ['zz| alpha', 'aa| omega', 'mm| middle'].map((value) => ({ action: 'include', op: 'equals', value })),
+    name_rules: [{ scope: 'both', find: '^[A-Z]{2}[:|] ?', replace: '' }],
+  });
+  const lines = async () => [...(await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text()).matchAll(/tvg-chno="(\d+)" group-title="([^"]*)",([^\n]+)\n/g)].map((m) => ({ chno: m[1], group: m[2], name: m[3] }));
+  const names = async () => (await lines()).map((l) => l.name);
+  const groups = async () => [...new Set((await lines()).map((l) => l.group))];
+  const sort = (fields) => api('PUT', `/api/outputs/${o.id}/sort`, fields);
+  const catList = async () => (await api('GET', `/api/outputs/${o.id}/categories`)).data;
+  const alpha = (await catList()).find((c) => c.name === 'ZZ| ALPHA');
+  const panel = async () => (await api('GET', `/api/outputs/${o.id}/channels?category_id=${alpha.id}`)).data;
+
+  // Provider order to start with.
+  assert.deepEqual(await groups(), ['ALPHA', 'OMEGA', 'MIDDLE']);
+  assert.deepEqual((await names()).slice(0, 4), ['Zebra', 'Apple', 'Channel 10', 'Channel 2']);
+  assert.equal((await sort({ cat_sort: 'sideways' })).status, 400);
+  assert.equal((await sort({ ch_sort: 'custom' })).status, 400, 'custom is per category');
+
+  // By name: the cleaned names (the provider's would put Zebra first), numbers in natural order.
+  await sort({ cat_sort: 'name', ch_sort: 'name' });
+  assert.deepEqual(await groups(), ['ALPHA', 'MIDDLE', 'OMEGA']);
+  assert.deepEqual((await names()).slice(0, 4), ['Apple', 'Channel 2', 'Channel 10', 'Zebra']);
+  assert.deepEqual((await lines()).slice(0, 2).map((l) => l.chno), ['100', '101'], 'renumbering follows the order');
+  assert.deepEqual((await catList()).filter((c) => c.included).map((c) => c.name), ['ZZ| ALPHA', 'MM| MIDDLE', 'AA| OMEGA'], 'the page shows the same order');
+  assert.deepEqual((await panel()).channels.map((c) => c.clean_name), ['Apple', 'Channel 2', 'Channel 10', 'Zebra']);
+  assert.equal((await panel()).sort_mode, 'name');
+  // The Xtream Codes login follows the same order.
+  const xc = (action) => fetch(`${base}/player_api.php?username=sorted&password=sp&action=${action}`).then((x) => x.json());
+  assert.deepEqual((await xc('get_live_categories')).map((c) => c.category_name), ['ALPHA', 'MIDDLE', 'OMEGA']);
+  assert.deepEqual((await xc('get_live_streams')).slice(0, 2).map((s) => s.name), ['Apple', 'Channel 2'], 'the Xtream Codes login too');
+
+  // Custom: starts from the order on screen, then arranged by hand.
+  await sort({ cat_sort: 'custom' });
+  assert.deepEqual(await groups(), ['ALPHA', 'MIDDLE', 'OMEGA']);
+  const cats = await catList();
+  const [first, second, third] = cats.filter((c) => c.included);
+  await api('PUT', `/api/outputs/${o.id}/category-order`, { ids: [third, first, second, ...cats.filter((c) => !c.included)].map((c) => c.id) });
+  assert.deepEqual(await groups(), ['OMEGA', 'ALPHA', 'MIDDLE']);
+  await api('PUT', `/api/outputs/${o.id}/categories/${alpha.id}/channel-sort`, { mode: 'custom' });
+  assert.deepEqual((await panel()).channels.map((c) => c.clean_name), ['Apple', 'Channel 2', 'Channel 10', 'Zebra']);
+  const ids = (await panel()).channels.map((c) => c.id);
+  await api('PUT', `/api/outputs/${o.id}/categories/${alpha.id}/channel-order`, { ids: [ids[3], ids[1], ids[0], ids[2]] });
+  assert.deepEqual((await names()).slice(1, 5), ['Zebra', 'Channel 2', 'Apple', 'Channel 10']);
+  assert.equal((await panel()).ch_sort, 'custom');
+  assert.equal((await api('PUT', `/api/outputs/${o.id}/categories/${alpha.id}/channel-sort`, { mode: 'upside' })).status, 400);
+
+  // Something new from the provider goes last, flagged, and nothing moves.
+  xcStreams.push({ num: 207, name: 'AA: Aardvark', stream_id: 2007, stream_icon: '', epg_channel_id: '', category_id: '41' });
+  await api('POST', `/api/sources/${xcId}/refresh`);
+  await app.ctx.jobs.idle();
+  assert.deepEqual((await names()).slice(1, 6), ['Zebra', 'Channel 2', 'Apple', 'Channel 10', 'Aardvark']);
+
+  // Kept by duplicates and backups.
+  const dupe = (await api('POST', `/api/outputs/${o.id}/clone`)).data;
+  assert.deepEqual([dupe.cat_sort, dupe.ch_sort], ['custom', 'name']);
+  assert.deepEqual([...(await (await fetch(`${base}/o/${dupe.token}/playlist.m3u`)).text()).matchAll(/group-title="([^"]*)"/g)].map((m) => m[1]).filter((g, i, a) => a.indexOf(g) === i), ['OMEGA', 'ALPHA', 'MIDDLE']);
+  await api('DELETE', `/api/outputs/${dupe.id}`);
+  const file = (await api('GET', '/api/export')).data;
+  const saved = file.outputs.find((x) => x.token === o.token);
+  assert.deepEqual(saved.category_order.slice(0, 3).map((c) => c.category), ['AA| OMEGA', 'ZZ| ALPHA', 'MM| MIDDLE']);
+  assert.equal(saved.category_options.find((c) => c.category === 'ZZ| ALPHA').ch_sort, 'custom');
+  const dbFile = path.join(os.tmpdir(), `iptvm-sort-${process.pid}.db`);
+  const db2 = openDb(dbFile);
+  try {
+    importSettings(db2, file);
+    const r = db2.get('SELECT id, cat_sort, ch_sort FROM outputs WHERE token = ?', [o.token]);
+    assert.deepEqual([r.cat_sort, r.ch_sort], ['custom', 'name']);
+    assert.deepEqual(db2.all(`SELECT c.name FROM output_category_order x JOIN categories c ON c.id = x.category_id WHERE x.output_id = ? ORDER BY x.position LIMIT 3`, [r.id]).map((c) => c.name),
+      ['AA| OMEGA', 'ZZ| ALPHA', 'MM| MIDDLE']);
+    assert.deepEqual(db2.all(`SELECT c.key FROM output_channel_order x JOIN channels c ON c.id = x.channel_id WHERE x.output_id = ? ORDER BY x.position LIMIT 2`, [r.id]).map((c) => c.key),
+      saved.channel_order.slice(0, 2).map((c) => c.key));
+  } finally {
+    db2.close();
+    for (const f of [dbFile, `${dbFile}-wal`, `${dbFile}-shm`]) fs.rmSync(f, { force: true });
+  }
+  await api('DELETE', `/api/outputs/${o.id}`);
+});
+
 test('a proxied stream the provider turns down is logged with why, once a minute, and shown on the source', async () => {
   const o = (await api('POST', '/api/outputs', { name: 'Refusals' })).data;
   await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy', source_ids: [xcId, m3uId], rules: [{ action: 'include', op: 'equals', value: 'us| news' }] });

@@ -31,11 +31,13 @@ export function exportSettings(db, { secrets = true, appVersion = null } = {}) {
   const catOverrides = db.all('SELECT * FROM output_category_overrides');
   const chOverrides = db.all('SELECT * FROM output_channel_overrides');
   const chRules = db.all('SELECT * FROM output_channel_rules ORDER BY sort, id');
-  const catSettings = db.all('SELECT * FROM output_category_settings WHERE hide_empty = 1 OR hide_by_guide = 1 OR hide_unlisted = 1');
-  const neededCats = new Set([...catOverrides, ...chRules, ...catSettings].map((r) => r.category_id));
+  const catSettings = db.all('SELECT * FROM output_category_settings WHERE hide_empty = 1 OR hide_by_guide = 1 OR hide_unlisted = 1 OR ch_sort IS NOT NULL');
+  const catOrder = db.all('SELECT * FROM output_category_order ORDER BY position');
+  const chOrder = db.all('SELECT * FROM output_channel_order ORDER BY position');
+  const neededCats = new Set([...catOverrides, ...chRules, ...catSettings, ...catOrder].map((r) => r.category_id));
   const customPatterns = db.getSetting('empty_event_patterns');
   const customGuide = db.getSetting('guide_patterns');
-  const neededChans = new Set(chOverrides.map((r) => r.channel_id));
+  const neededChans = new Set([...chOverrides, ...chOrder].map((r) => r.channel_id));
   // Movies and series: renamed titles, and hand picks, named by source, kind and provider id.
   const vodOverrides = db.all('SELECT * FROM output_vod_overrides');
   const vodRef = new Map(db.all('SELECT id, source_id, kind, key FROM vod_items WHERE custom_name IS NOT NULL OR id IN (SELECT item_id FROM output_vod_overrides)')
@@ -89,6 +91,16 @@ export function exportSettings(db, { secrets = true, appVersion = null } = {}) {
       vod_enabled: !!o.vod_enabled,
       light_enabled: !!o.light_enabled,
       convert_mode: o.convert_mode || 'off',
+      cat_sort: o.cat_sort || 'provider',
+      ch_sort: o.ch_sort || 'provider',
+      category_order: catOrder.filter((r) => r.output_id === o.id && catRef.has(r.category_id)).map((r) => {
+        const c = catRef.get(r.category_id);
+        return { source: c.source_id, category: c.name, ...kindOf(c) };
+      }),
+      channel_order: chOrder.filter((r) => r.output_id === o.id && chRef.has(r.channel_id)).map((r) => {
+        const c = chRef.get(r.channel_id);
+        return { source: c.source_id, key: c.key };
+      }),
       paused: !!o.paused,
       xc_password: secrets ? o.xc_password : null,
       sources: db.all('SELECT source_id FROM output_sources WHERE output_id = ? ORDER BY sort', [o.id]).map((r) => r.source_id),
@@ -111,6 +123,7 @@ export function exportSettings(db, { secrets = true, appVersion = null } = {}) {
           source: c.source_id, category: c.name,
           hide_empty: !!r.hide_empty, hide_by_guide: !!r.hide_by_guide, hide_unlisted: !!r.hide_unlisted,
           unlisted_hours: r.unlisted_hours,
+          ...(r.ch_sort ? { ch_sort: r.ch_sort } : {}),
         };
       }),
       channel_overrides: chOverrides.filter((r) => r.output_id === o.id && chRef.has(r.channel_id)).map((r) => {
@@ -269,14 +282,15 @@ export function importSettings(db, data) {
     for (const o of data.outputs) {
       const r = db.get(
         `INSERT INTO outputs (name, token, stream_mode, include_all, include_all_movie, include_all_series, number_start, epg_days,
-                              xc_enabled, xc_username, xc_password, name_rules, vod_enabled, light_enabled, convert_mode, paused, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+                              xc_enabled, xc_username, xc_password, name_rules, vod_enabled, light_enabled, convert_mode, cat_sort, ch_sort, paused, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         // Files from before these switches existed: movies and series followed the live TV one.
         [String(o.name || 'Output'), o.token, o.stream_mode, !!o.include_all, o.include_all_movie ?? !!o.include_all,
           o.include_all_series ?? !!o.include_all, o.number_start ?? null, Number(o.epg_days) || 7,
           !!o.xc_enabled && !!o.xc_username && !!o.xc_password, o.xc_username || null, o.xc_password || null,
           JSON.stringify(checkNameRules(o.name_rules ?? []).rules), !!o.vod_enabled, !!o.light_enabled,
-          ['needed', 'always'].includes(o.convert_mode) ? o.convert_mode : 'off', !!o.paused, t, t],
+          ['needed', 'always'].includes(o.convert_mode) ? o.convert_mode : 'off',
+          ['name', 'custom'].includes(o.cat_sort) ? o.cat_sort : 'provider', o.ch_sort === 'name' ? 'name' : 'provider', !!o.paused, t, t],
       );
       summary.outputs++;
       (o.sources || []).forEach((ref, i) => {
@@ -298,18 +312,23 @@ export function importSettings(db, data) {
         ]);
       }
       for (const x of o.category_options || []) {
-        db.run(`INSERT OR REPLACE INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours)
-                VALUES (?, ?, ?, ?, ?, ?)`, [
+        db.run(`INSERT OR REPLACE INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours, ch_sort)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`, [
           r.id, ensureCat(x.source, x.category), !!x.hide_empty, !!x.hide_by_guide, !!x.hide_unlisted,
           Number.isInteger(x.unlisted_hours) && x.unlisted_hours >= 1 && x.unlisted_hours <= 168 ? x.unlisted_hours : 24,
+          ['provider', 'name', 'custom'].includes(x.ch_sort) ? x.ch_sort : null,
         ]);
       }
+      (o.category_order || []).forEach((x, i) => {
+        db.run('INSERT OR REPLACE INTO output_category_order (output_id, category_id, position) VALUES (?, ?, ?)', [r.id, ensureCat(x.source, x.category, x.kind), i]);
+      });
       (o.channel_rules || []).forEach((x, i) => {
         db.run('INSERT INTO output_channel_rules (output_id, category_id, action, op, value, sort) VALUES (?, ?, ?, ?, ?, ?)', [
           r.id, ensureCat(x.source, x.category), x.action, x.op, x.value, i,
         ]);
       });
-      for (const x of o.channel_overrides || []) {
+      // Channels aren't loaded yet: a placeholder by provider key, filled in by the next refresh.
+      const ensureChannel = (x) => {
         let id = chIds.get(`${x.source}|${x.key}`);
         if (!id) {
           id = db.get(
@@ -318,6 +337,13 @@ export function importSettings(db, data) {
           ).id;
           chIds.set(`${x.source}|${x.key}`, id);
         }
+        return id;
+      };
+      (o.channel_order || []).forEach((x, i) => {
+        db.run('INSERT OR REPLACE INTO output_channel_order (output_id, channel_id, position) VALUES (?, ?, ?)', [r.id, ensureChannel(x), i]);
+      });
+      for (const x of o.channel_overrides || []) {
+        const id = ensureChannel(x);
         db.run('INSERT OR REPLACE INTO output_channel_overrides (output_id, channel_id, state) VALUES (?, ?, ?)', [
           r.id, id, x.state === 'include' ? 'include' : 'exclude',
         ]);

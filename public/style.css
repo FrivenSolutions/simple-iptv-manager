@@ -286,6 +286,19 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; backgr
 .ch-option .check.sub { margin: 4px 0 0 22px; font-size: 13px; }
 .ch-option .hint.sub { margin-left: 44px; }
 .warn-text { color: var(--warn); }
+.sort-bar { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-bottom: 12px; }
+.sort-bar .hint { margin: 0; }
+.sort-pick { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.sort-pick select { width: auto; padding-top: 3px; padding-bottom: 3px; font-size: 13px; }
+.columns-note { font-size: 12px; }
+.ch-box.one-col { grid-template-columns: minmax(0, 1fr); }
+.ch-box.one-col .ch-row:has(.move-tools) { grid-template-columns: auto auto minmax(0, 1fr); }
+.ch-box.one-col .ch-row:has(.move-tools) .ch-details { grid-column: 3; }
+.move-tools { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.move-tools .icon-btn { padding: 0 4px; }
+.move-tools .icon-btn:disabled { opacity: .3; cursor: default; }
+.row-dragging { opacity: .45; }
+.row-drop { box-shadow: 0 -3px 0 var(--accent); }
 .fold-head { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .fold-head h2 { margin: 0; }
 .fold-arrow { width: 12px; color: var(--muted); }

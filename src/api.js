@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { HttpError, sendJson, readJson, baseUrl } from './http.js';
 import { hashPassword, verifyPassword, makeSession, sessionCookie, randomToken, COOKIE } from './auth.js';
 import {
-  OPS, loadOutput, evaluateCategories, isNewCategory, channelState,
+  OPS, loadOutput, evaluateCategories, channelCompare, positionsOf, isNewCategory, channelState,
   DEFAULT_EMPTY_EVENT_PATTERNS, emptyEventPatterns, compilePatterns, isEmptyEvent,
   DEFAULT_GUIDE_PATTERNS, guidePatterns, guideHider, hiddenReason,
   checkNameRules, parseNameRules, nameCleaner, nowTitles, affixText,
@@ -28,6 +28,7 @@ const UPLOAD_LIMIT = 1024 * 1024 * 1024;
 const IMPORT_LIMIT = 50 * 1024 * 1024;
 const LOGIN_LOCK_AFTER = 5;
 const CONVERT_MODES = ['off', 'needed', 'always'];
+const NEW_CHANNEL_S = 7 * 86400;
 const LOGIN_LOCK_S = 60;
 
 const str = (v, max = 2000) => (v == null ? '' : String(v).trim().slice(0, max));
@@ -185,6 +186,8 @@ function outputView(req, ctx, o, withDetail = false) {
     vod_enabled: !!o.vod_enabled,
     light_enabled: !!o.light_enabled,
     convert_mode: o.convert_mode || 'off',
+    cat_sort: o.cat_sort || 'provider',
+    ch_sort: o.ch_sort || 'provider',
     paused: !!o.paused,
     xc_username: o.xc_username,
     xc_password: o.xc_password,
@@ -960,9 +963,9 @@ export function registerApi(router, ctx) {
     const id = db.tx(() => {
       const copyId = db.get(
         `INSERT INTO outputs (name, token, stream_mode, include_all, include_all_movie, include_all_series, number_start, epg_days,
-                              xc_enabled, xc_username, xc_password, name_rules, vod_enabled, light_enabled, convert_mode, paused, created_at, updated_at)
+                              xc_enabled, xc_username, xc_password, name_rules, vod_enabled, light_enabled, convert_mode, cat_sort, ch_sort, paused, created_at, updated_at)
          SELECT ?, ?, stream_mode, include_all, include_all_movie, include_all_series, number_start, epg_days,
-                0, NULL, NULL, name_rules, vod_enabled, light_enabled, convert_mode, paused, ?, ?
+                0, NULL, NULL, name_rules, vod_enabled, light_enabled, convert_mode, cat_sort, ch_sort, paused, ?, ?
            FROM outputs WHERE id = ? RETURNING id`,
         [`${o.name} (copy)`.slice(0, 200), randomToken(), t, t, o.id],
       ).id;
@@ -975,8 +978,10 @@ export function registerApi(router, ctx) {
       db.run('INSERT INTO output_category_overrides (output_id, category_id, state) SELECT ?, category_id, state FROM output_category_overrides WHERE output_id = ?', [copyId, o.id]);
       db.run('INSERT INTO output_channel_overrides (output_id, channel_id, state) SELECT ?, channel_id, state FROM output_channel_overrides WHERE output_id = ?', [copyId, o.id]);
       db.run('INSERT INTO output_vod_overrides (output_id, item_id, state) SELECT ?, item_id, state FROM output_vod_overrides WHERE output_id = ?', [copyId, o.id]);
-      db.run(`INSERT INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours)
-              SELECT ?, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours FROM output_category_settings WHERE output_id = ?`, [copyId, o.id]);
+      db.run(`INSERT INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours, ch_sort)
+              SELECT ?, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours, ch_sort FROM output_category_settings WHERE output_id = ?`, [copyId, o.id]);
+      db.run('INSERT INTO output_category_order (output_id, category_id, position) SELECT ?, category_id, position FROM output_category_order WHERE output_id = ?', [copyId, o.id]);
+      db.run('INSERT INTO output_channel_order (output_id, channel_id, position) SELECT ?, channel_id, position FROM output_channel_order WHERE output_id = ?', [copyId, o.id]);
       return copyId;
     });
     touch();
@@ -1154,16 +1159,20 @@ export function registerApi(router, ctx) {
     const overrides = new Map(db.all('SELECT channel_id, state FROM output_channel_overrides WHERE output_id = ?', [o.id])
       .map((r) => [r.channel_id, r.state]));
     const rows = db.all(
-      `SELECT id, name, custom_name, logo, custom_logo, epg_id, custom_epg_id, tvg_id
+      `SELECT id, name, custom_name, logo, custom_logo, epg_id, custom_epg_id, tvg_id, sort, first_seen
          FROM channels WHERE category_id = ? AND active = 1 ORDER BY sort`,
       [catId],
     );
+    rows.sort(channelCompare(o, cat, cleanerFor(o, 'live'), positionsOf(db, 'output_channel_order', 'channel_id', o.id)));
+    const firstRefresh = db.get('SELECT first_refresh_at FROM sources WHERE id = ?', [cat.source_id])?.first_refresh_at || 0;
     const emptyRegexes = compilePatterns(emptyEventPatterns(db));
     const clean = cleanerFor(o, 'live');
     // What is on now is shown even with the toggle off, so its effect can be judged first.
     const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }]);
     sendJson(res, 200, {
       category_included: cat.included,
+      ch_sort: cat.ch_sort, // this category's own sort, null when it follows the output
+      sort_mode: cat.ch_sort || o.ch_sort || 'provider',
       hide_empty: cat.hide_empty,
       hide_by_guide: cat.hide_by_guide,
       hide_unlisted: cat.hide_unlisted,
@@ -1177,6 +1186,8 @@ export function registerApi(router, ctx) {
         return {
           ...r, override,
           clean_name: clean.channel(r.name),
+          // Added since the source's first refresh, in the last week.
+          is_new: r.first_seen > firstRefresh + 60 && r.first_seen > now() - NEW_CHANNEL_S,
           is_empty_event: isEmptyEvent(r.name, emptyRegexes),
           now_title: guide.titleOf(ch),
           is_guide_placeholder: guide.isPlaceholder(ch),
@@ -1315,6 +1326,71 @@ export function registerApi(router, ctx) {
   });
 
   // Replace the channel rules of one category in this output.
+  // Order: the output's sorts (category and channel), and arrangements made by hand.
+  const replaceOrder = (table, column, outputId, ids) => db.tx(() => {
+    ids.forEach((id, i) => {
+      db.run(`INSERT INTO ${table} (output_id, ${column}, position) VALUES (?, ?, ?)
+              ON CONFLICT(output_id, ${column}) DO UPDATE SET position = excluded.position`, [outputId, Number(id), i]);
+    });
+  });
+  const idList = (ids) => {
+    if (!Array.isArray(ids) || !ids.every((x) => Number.isInteger(x))) throw new HttpError(400, 'ids must be a list of ids');
+    return ids;
+  };
+  router.put('/api/outputs/:id/sort', async (req, res, { params }) => {
+    const o = loadOutput(db, Number(params.id));
+    if (!o) throw new HttpError(404, 'Not found');
+    const { cat_sort: catSort, ch_sort: chSort } = await readJson(req);
+    if (catSort !== undefined) {
+      if (!['provider', 'name', 'custom'].includes(catSort)) throw new HttpError(400, 'Unknown sort');
+      // First time on Custom: start from the order on screen rather than jump back to the provider's.
+      if (catSort === 'custom' && !db.get('SELECT 1 FROM output_category_order WHERE output_id = ? LIMIT 1', [o.id])) {
+        for (const kind of ['live', 'movie', 'series']) replaceOrder('output_category_order', 'category_id', o.id, evaluateCategories(db, o, kind).map((c) => c.id));
+      }
+      db.run('UPDATE outputs SET cat_sort = ? WHERE id = ?', [catSort, o.id]);
+    }
+    if (chSort !== undefined) {
+      if (!['provider', 'name'].includes(chSort)) throw new HttpError(400, 'Unknown sort');
+      db.run('UPDATE outputs SET ch_sort = ? WHERE id = ?', [chSort, o.id]);
+    }
+    touch();
+    sendJson(res, 200, { ok: true });
+  });
+  router.put('/api/outputs/:id/category-order', async (req, res, { params }) => {
+    const o = mustGet(db, 'outputs', params.id);
+    replaceOrder('output_category_order', 'category_id', o.id, idList((await readJson(req)).ids));
+    touch();
+    sendJson(res, 200, { ok: true });
+  });
+  // One category's sort: null follows the output.
+  router.put('/api/outputs/:id/categories/:catId/channel-sort', async (req, res, { params }) => {
+    const o = loadOutput(db, Number(params.id));
+    if (!o) throw new HttpError(404, 'Not found');
+    const cat = evaluateCategories(db, o).find((c) => c.id === Number(params.catId));
+    if (!cat) throw new HttpError(404, 'Category is not part of this output');
+    const { mode = null } = await readJson(req);
+    if (![null, 'provider', 'name', 'custom'].includes(mode)) throw new HttpError(400, 'Unknown sort');
+    if (mode === 'custom') {
+      const rows = db.all('SELECT id, name, custom_name, sort FROM channels WHERE category_id = ? AND active = 1 ORDER BY sort', [cat.id]);
+      const positions = positionsOf(db, 'output_channel_order', 'channel_id', o.id);
+      // First time on Custom for this category: start from the order on screen.
+      if (!rows.some((r) => positions.has(r.id))) {
+        rows.sort(channelCompare(o, cat, cleanerFor(o, 'live'), positions));
+        replaceOrder('output_channel_order', 'channel_id', o.id, rows.map((r) => r.id));
+      }
+    }
+    db.run(`INSERT INTO output_category_settings (output_id, category_id, ch_sort) VALUES (?, ?, ?)
+            ON CONFLICT(output_id, category_id) DO UPDATE SET ch_sort = excluded.ch_sort`, [o.id, cat.id, mode]);
+    touch();
+    sendJson(res, 200, { ok: true });
+  });
+  router.put('/api/outputs/:id/categories/:catId/channel-order', async (req, res, { params }) => {
+    const o = mustGet(db, 'outputs', params.id);
+    replaceOrder('output_channel_order', 'channel_id', o.id, idList((await readJson(req)).ids));
+    touch();
+    sendJson(res, 200, { ok: true });
+  });
+
   router.put('/api/outputs/:id/categories/:catId/channel-rules', async (req, res, { params }) => {
     const o = mustGet(db, 'outputs', params.id);
     const cat = mustGet(db, 'categories', params.catId);

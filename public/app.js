@@ -182,6 +182,54 @@ function foldCard(key, title, note, ...body) {
   return h('section', { class: 'card' }, head, inner);
 }
 
+/** A small "Sort: ..." dropdown. options: [[value, label]]. */
+function sortPicker(label, value, options, onchange) {
+  return h('label', { class: 'sort-pick' }, h('span', { class: 'meta' }, label),
+    h('select', { onchange: (e) => onchange(e.target.value) }, options.map(([v, l]) => h('option', { value: v, selected: v === value }, l))));
+}
+
+// Rows arranged by hand: drag by the ⠿ handle, or ↑/↓ (phones have no drag). Rows only move within
+// their group. drop(draggedId) puts the dragged row just before this one.
+let draggedRow = null;
+function movable(el, { id, group, up, down, drop }) {
+  const clear = () => document.querySelectorAll('.row-drop').forEach((x) => x.classList.remove('row-drop'));
+  el.addEventListener('dragstart', (e) => {
+    draggedRow = { id, group };
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    el.classList.add('row-dragging');
+  });
+  el.addEventListener('dragend', () => {
+    draggedRow = null;
+    el.draggable = false;
+    el.classList.remove('row-dragging');
+    clear();
+  });
+  el.addEventListener('dragover', (e) => {
+    if (!draggedRow || draggedRow.group !== group || draggedRow.id === id) return;
+    e.preventDefault();
+    clear();
+    el.classList.add('row-drop');
+  });
+  el.addEventListener('drop', (e) => {
+    if (!draggedRow || draggedRow.group !== group || draggedRow.id === id) return;
+    e.preventDefault();
+    drop(draggedRow.id);
+  });
+  // Inside a channel's label: a click here mustn't tick its box.
+  const button = (text, title, fn) => h('button', { class: 'icon-btn', type: 'button', title, disabled: !fn, onclick: (e) => { e.preventDefault(); fn(); } }, text);
+  el.prepend(h('span', { class: 'move-tools', onclick: (e) => e.preventDefault() },
+    h('span', {
+      class: 'drag-handle',
+      title: 'Drag to arrange',
+      onmousedown: () => { el.draggable = true; },
+      onmouseup: () => { el.draggable = false; },
+    }, '⠿'),
+    button('↑', 'Move up', up),
+    button('↓', 'Move down', down)));
+  return el;
+}
+
 const ruleCount = (rules) => `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
 
 function badge(text, kind = '') {
@@ -1210,6 +1258,48 @@ async function outputEditor(main, id) {
       }, 'Done'),
     ]);
   };
+  // Sorting (saved at once, like hand picks). Categories sort within each source; channels within
+  // their category. It's the order of the published playlist and guide too.
+  const sortBars = [];
+  const resort = async (fields) => {
+    await attempt(() => api('PUT', `/api/outputs/${id}/sort`, fields), 'Order saved');
+    Object.assign(o, fields);
+    for (const fn of sortBars) fn();
+    cats = await api('GET', `/api/outputs/${id}/categories`);
+    for (const p of panels.values()) if (p.rerender) await loadPanel(p.cat, p);
+    drawCats();
+    for (const p of Object.values(vodPanes)) if (p.loaded) await p.load();
+  };
+  const sortBar = (withChannels) => {
+    const box = h('div', { class: 'sort-bar' });
+    const draw = () => fill(box,
+      sortPicker('Sort categories', o.cat_sort, [['provider', 'Provider order'], ['name', 'Name'], ['custom', 'Custom']], (v) => resort({ cat_sort: v })),
+      withChannels ? sortPicker('Sort channels', o.ch_sort, [['provider', 'Provider order'], ['name', 'Name']], (v) => resort({ ch_sort: v })) : null,
+      h('span', { class: 'hint' }, o.cat_sort === 'custom' ? 'Drag ⠿ or use ↑ ↓, with search and filters clear. ' : '',
+        'Names are the ones players see. This is the order of the published playlist.'));
+    sortBars.push(draw);
+    draw();
+    return box;
+  };
+  const arrangeCategory = (row, c, list, redraw) => {
+    const i = list.indexOf(c);
+    const save = () => attempt(() => api('PUT', `/api/outputs/${id}/category-order`, { ids: list.map((x) => x.id) }));
+    const before = (movedId, target) => {
+      const moved = list.find((x) => x.id === movedId);
+      list.splice(list.indexOf(moved), 1);
+      list.splice(list.indexOf(target), 0, moved);
+      redraw();
+      save();
+    };
+    const same = (x) => x && x.source_id === c.source_id;
+    movable(row, {
+      id: c.id,
+      group: `cat${c.source_id}`,
+      up: same(list[i - 1]) ? () => before(c.id, list[i - 1]) : null,
+      down: same(list[i + 1]) ? () => before(list[i + 1].id, c) : null,
+      drop: (movedId) => before(movedId, c),
+    });
+  };
   // Category rows, under a heading per provider when the output has more than one source, even if
   // only one of them has rows here (say, the only one with movies). Rows come in source order, so
   // each provider's categories are together.
@@ -1472,6 +1562,8 @@ async function outputEditor(main, id) {
     }
     summary.textContent = `${inc} of ${cats.length} categories · about ${chans} channels${dirty ? ' (preview)' : ''}`;
     const LIMIT = 500;
+    // By hand only with the whole list showing, so a row's neighbors are its real neighbors.
+    const arrange = o.cat_sort === 'custom' && !view.q && view.show === 'all' && !hideExcluded;
     fill(catBox, 
       ...withGroups(rows.slice(0, LIMIT), (c) => {
         const st = evalCat(c);
@@ -1487,6 +1579,7 @@ async function outputEditor(main, id) {
             hitLine(c)),
           h('button', { class: 'icon-btn', title: 'Edit group (display name, Jellyfin category)', onclick: () => editCategory(c, drawCats) }, '✎'),
           h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
+        if (arrange) arrangeCategory(row, c, cats, drawCats);
         if (!view.open.has(c.id)) return row;
         return h('div', null, row, channelPanel(c));
       }),
@@ -1576,6 +1669,7 @@ async function outputEditor(main, id) {
 
   const renderPanel = (c, p, data) => {
     p.rerender = () => renderPanel(c, p, data);
+    p.cat = c;
     const saveRules = async () => {
       await attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/channel-rules`, { rules: p.rules }));
       c.channel_rules = p.rules.filter((r) => r.value !== '');
@@ -1590,6 +1684,15 @@ async function outputEditor(main, id) {
       refreshCounts();
     };
     const chans = data.channels;
+    // Arranged by hand: one column, so the order is plain to see.
+    const custom = data.sort_mode === 'custom';
+    const moveBefore = (movedId, target) => {
+      const moved = chans.find((x) => x.id === movedId);
+      chans.splice(chans.indexOf(moved), 1);
+      chans.splice(chans.indexOf(target), 0, moved);
+      renderPanel(c, p, data);
+      attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/channel-order`, { ids: chans.map((x) => x.id) }));
+    };
     // Channel rules and picks only mean something once the category is in the output;
     // until then everything is shown but locked.
     const off = !data.category_included;
@@ -1686,6 +1789,14 @@ async function outputEditor(main, id) {
         ruleBox),
       h('div', { class: 'ch-toolbar' },
         h('span', { class: 'meta' }, `${included} of ${chans.length} channels included`),
+        sortPicker('Sort', data.ch_sort || '', [
+          ['', `Same as output (${o.ch_sort === 'name' ? 'name' : 'provider order'})`],
+          ['provider', 'Provider order'], ['name', 'Name'], ['custom', 'Custom'],
+        ], async (v) => {
+          await attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/channel-sort`, { mode: v || null }), 'Order saved');
+          loadPanel(c, p);
+        }),
+        custom ? null : h('span', { class: 'meta columns-note', title: 'The order goes left to right, then down to the next row' }, 'Reads across, then down'),
         h('label', { class: 'check hide-excluded', title: 'Show only the channels of this category that are in the output' },
           h('input', { type: 'checkbox', checked: !!p.hideOut, onchange: (e) => { p.hideOut = e.target.checked; renderPanel(c, p, data); } }),
           ' Hide excluded'),
@@ -1693,7 +1804,7 @@ async function outputEditor(main, id) {
           h('button', { class: 'btn small', disabled: off, title: 'Include every channel in this category by hand', onclick: () => setChannels(chans.map((ch) => ch.id), 'include') }, 'Select all'),
           h('button', { class: 'btn small', disabled: off, title: 'Exclude every channel in this category by hand', onclick: () => setChannels(chans.map((ch) => ch.id), 'exclude') }, 'Deselect all'),
           h('button', { class: 'btn small', disabled: off || !overridden.length, title: 'Clear hand picks so the category and channel rules decide', onclick: () => setChannels(overridden, null) }, 'Reset to rules'))),
-      h('div', { class: 'ch-box' },
+      h('div', { class: `ch-box ${custom ? 'one-col' : ''}` },
         // Two lines per channel: the name gets the full width; details go underneath.
         chans.filter((ch) => !p.hideOut || ch.included).map((ch) => {
           const name = ch.custom_name || ch.clean_name || ch.name;
@@ -1701,15 +1812,26 @@ async function outputEditor(main, id) {
           const now = ch.now_title ? h('span', { class: `now-title ${ch.is_guide_placeholder ? 'placeholder' : ''}`, title: `On now: ${ch.now_title}` }, `▸ ${ch.now_title}`)
             : ch.next ? h('span', { class: 'now-title', title: `Next: ${ch.next.title}, ${whenLocal(ch.next.start)}` }, `next ${whenLocal(ch.next.start)}: ${ch.next.title}`)
             : ch.is_unlisted ? h('span', { class: 'now-title placeholder', title: `Nothing in the guide for the next ${data.unlisted_hours} hours` }, `▸ nothing in the next ${data.unlisted_hours} h`) : null;
-          return h('label', { class: `ch-row ${ch.override && !off ? 'overridden' : ''} ${ch.included ? '' : 'out'}`, 'data-name': `${ch.name}\n${ch.custom_name || ''}`, title: off ? 'Include the category first' : [name, why].filter(Boolean).join('\n') },
+          const row = h('label', { class: `ch-row ${ch.override && !off ? 'overridden' : ''} ${ch.included ? '' : 'out'}`, 'data-name': `${ch.name}\n${ch.custom_name || ''}`, title: off ? 'Include the category first' : [name, why].filter(Boolean).join('\n') },
             h('input', { type: 'checkbox', disabled: off, checked: ch.included, onchange: (e) => setChannels([ch.id], e.target.checked ? 'include' : 'exclude') }),
-            h('span', { class: 'ch-name' }, shownName(ch)),
+            h('span', { class: 'ch-name' }, shownName(ch), ch.is_new ? [' ', badge('new', 'info')] : null),
             now || why || (ch.override && !off)
               ? h('span', { class: 'ch-details' },
                 why ? h('span', { class: 'ch-why' }, why) : null,
                 now,
                 ch.override && !off ? h('button', { class: 'link', onclick: (e) => { e.preventDefault(); setChannels([ch.id], null); } }, 'reset') : null)
               : null);
+          if (custom && !p.hideOut) {
+            const i = chans.indexOf(ch);
+            movable(row, {
+              id: ch.id,
+              group: `ch${c.id}`,
+              up: i > 0 ? () => moveBefore(ch.id, chans[i - 1]) : null,
+              down: i < chans.length - 1 ? () => moveBefore(chans[i + 1].id, ch) : null,
+              drop: (movedId) => moveBefore(movedId, ch),
+            });
+          }
+          return row;
         }),
         chans.length ? null : h('p', { class: 'meta' }, 'No channels.'),
         chans.length && p.hideOut && !chans.some((ch) => ch.included) ? h('p', { class: 'meta' }, 'Every channel here is excluded (Hide excluded is on).') : null));
@@ -1728,6 +1850,7 @@ async function outputEditor(main, id) {
         h('button', { class: 'btn small', onclick: bulk('include') }, 'Include shown'),
         h('button', { class: 'btn small', onclick: bulk('exclude') }, 'Exclude shown'),
         h('button', { class: 'btn small', onclick: bulk(null) }, 'Reset shown to Auto'))),
+    sortBar(true),
     hitNote,
     catBox);
 
@@ -2109,6 +2232,7 @@ async function outputEditor(main, id) {
               hitLine(c)),
             h('button', { class: 'icon-btn', title: 'Rename (the name players see)', onclick: () => editCategory(c, draw, { vod: true }) }, '✎'),
             h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
+          if (o.cat_sort === 'custom' && !state.q && state.show === 'all' && !hideExcluded) arrangeCategory(row, c, state.cats, draw);
           return state.open.has(c.id) ? h('div', null, row, titlesPanel(c)) : row;
         }),
         rows.length > LIMIT ? h('p', { class: 'meta pad' }, `Showing the first ${LIMIT} of ${rows.length}. Use the search box to narrow the list.`) : null,
@@ -2142,6 +2266,7 @@ async function outputEditor(main, id) {
             h('button', { class: 'btn small', onclick: bulk('include') }, 'Include shown'),
             h('button', { class: 'btn small', onclick: bulk('exclude') }, 'Exclude shown'),
             h('button', { class: 'btn small', onclick: bulk(null) }, 'Reset shown to Auto'))),
+        sortBar(false),
         hitNote,
         list));
     return { el, draw, load, rules, get loaded() { return !!state.cats; } };

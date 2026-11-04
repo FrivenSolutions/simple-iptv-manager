@@ -269,6 +269,24 @@ when they are built, from the `.git` folder in the build context. An image built
    every other login keeps working. The output's token URLs are shared by everyone who has them,
    so give people a login rather than those.
 
+### Sorting
+
+Each output has its own order, and it's the order players get in the playlist, the guide and the
+Xtream Codes login. Above the category list:
+
+- **Sort categories** puts the categories of each source in provider order, by name, or in a
+  **Custom** order you arrange with the ⠿ handle or the ↑/↓ buttons. Sources stay in their own
+  groups, in the order they're listed on the output.
+- **Sort channels** sets provider order or name for every category. Channels stay inside their
+  category.
+
+Expand a category to give it its own **Sort**, which is where **Custom** channel order lives. A
+custom list shows as one column and starts from the order on screen. Anything the provider adds
+later goes to the end, flagged **new**, and nothing else moves.
+
+Sorting by name uses the names players see, after name cleanup and with any source prefix or
+suffix. Filter rules aren't affected: they still match the provider's names.
+
 ### How filtering decides
 
 For each category in an output:

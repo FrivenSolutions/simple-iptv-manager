@@ -319,6 +319,26 @@ export function categoryAffixer(output) {
   };
 }
 
+// Names in the order people expect: "Channel 2" before "Channel 10", capitals or not.
+const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
+// Custom order: positions as arranged; anything added since goes last, in the provider's order.
+const byPosition = (positions, a, b) => (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity) || 0;
+
+export const positionsOf = (db, table, column, outputId) =>
+  new Map(db.all(`SELECT ${column} AS id, position FROM ${table} WHERE output_id = ?`, [outputId]).map((r) => [r.id, r.position]));
+
+/**
+ * How two channels of one category compare in an output: by the category's own sort, else the
+ * output's. Names are the ones players see. Rules never look at this; they use provider names.
+ */
+export function channelCompare(output, cat, clean, positions) {
+  const mode = cat.ch_sort || output.ch_sort || 'provider';
+  const shown = (ch) => ch.custom_name || clean.channel(ch.name);
+  if (mode === 'name') return (a, b) => byName(shown(a), shown(b)) || a.sort - b.sort;
+  if (mode === 'custom') return (a, b) => byPosition(positions, a, b) || a.sort - b.sort;
+  return (a, b) => a.sort - b.sort;
+}
+
 /** Categories from every source attached to the output, each with its decision. */
 /** Categories of one kind ('live', 'movie' or 'series'), each judged by that kind's rules. */
 export function evaluateCategories(db, output, kind = 'live') {
@@ -341,10 +361,18 @@ export function evaluateCategories(db, output, kind = 'live') {
     kind === 'live' ? [kind, ...ids] : [output.id, kind, ...ids],
   );
   const rules = output.rules.filter((r) => (r.kind || 'live') === kind);
-  cats.sort((a, b) => order.get(a.source_id) - order.get(b.source_id) || a.sort - b.sort);
+  // Sources stay in the output's order; categories sort within each one, by the name players see
+  // (prefix and suffix included) or as arranged by hand.
+  const catClean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || [], kind === 'live' ? 'live' : 'vod');
+  const affix = categoryAffixer(output);
+  const shownCat = (c) => affix(c.source_id, c.custom_name || catClean.category(c.name));
+  const catPositions = output.cat_sort === 'custom' ? positionsOf(db, 'output_category_order', 'category_id', output.id) : null;
+  const within = output.cat_sort === 'name' ? (a, b) => byName(shownCat(a), shownCat(b))
+    : catPositions ? (a, b) => byPosition(catPositions, a, b) : () => 0;
+  cats.sort((a, b) => order.get(a.source_id) - order.get(b.source_id) || within(a, b) || a.sort - b.sort);
   const chRules = loadChannelRules(db, output.id);
   const catSettings = new Map(
-    db.all('SELECT category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours FROM output_category_settings WHERE output_id = ?', [output.id])
+    db.all('SELECT category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours, ch_sort FROM output_category_settings WHERE output_id = ?', [output.id])
       .map((r) => [r.category_id, r]),
   );
   for (const c of cats) {
@@ -355,6 +383,7 @@ export function evaluateCategories(db, output, kind = 'live') {
     c.hide_by_guide = !!catSettings.get(c.id)?.hide_by_guide;
     c.hide_unlisted = !!catSettings.get(c.id)?.hide_unlisted;
     c.unlisted_hours = catSettings.get(c.id)?.unlisted_hours ?? DEFAULT_UNLISTED_HOURS;
+    c.ch_sort = catSettings.get(c.id)?.ch_sort || null;
     c.is_new = isNewCategory(c);
     c.jellyfin = parseJellyfin(c.jellyfin);
   }
@@ -394,9 +423,11 @@ export function selectChannels(db, output) {
     if (!channelState(ch.name, cat.included, cat.channel_rules, chOverrides.get(ch.id), hidden).included) continue;
     channels.push({ ch, cat });
   }
-  const order = new Map(output.sources.map((s, i) => [s.id, i]));
-  channels.sort((a, b) =>
-    order.get(a.ch.source_id) - order.get(b.ch.source_id) || a.cat.sort - b.cat.sort || a.ch.sort - b.ch.sort);
+  // Categories in their order (sources first), then each category's channels in theirs.
+  const catIndex = new Map(cats.map((c, i) => [c.id, i]));
+  const chPositions = positionsOf(db, 'output_channel_order', 'channel_id', output.id);
+  const compare = new Map(cats.map((c) => [c.id, channelCompare(output, c, clean, chPositions)]));
+  channels.sort((a, b) => catIndex.get(a.cat.id) - catIndex.get(b.cat.id) || compare.get(a.cat.id)(a.ch, b.ch));
 
   const idOwner = new Map(); // output tvg-id -> "sourceId|epgId"
   let num = output.number_start != null ? Number(output.number_start) : null;

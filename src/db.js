@@ -352,6 +352,25 @@ const MIGRATIONS = [
   -- MPEG-2 video or Dolby sound) or 'always'. Converted streams are H.264 with AAC sound.
   ALTER TABLE outputs ADD COLUMN convert_mode TEXT NOT NULL DEFAULT 'off';
   `,
+  `
+  -- Order in an output. Categories: 'provider', 'name' or 'custom', within each source. Channels:
+  -- 'provider' or 'name' for the output, and per category also 'custom' (NULL follows the output).
+  ALTER TABLE outputs ADD COLUMN cat_sort TEXT NOT NULL DEFAULT 'provider';
+  ALTER TABLE outputs ADD COLUMN ch_sort TEXT NOT NULL DEFAULT 'provider';
+  ALTER TABLE output_category_settings ADD COLUMN ch_sort TEXT;
+  CREATE TABLE output_category_order (
+    output_id INTEGER NOT NULL REFERENCES outputs(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (output_id, category_id)
+  );
+  CREATE TABLE output_channel_order (
+    output_id INTEGER NOT NULL REFERENCES outputs(id) ON DELETE CASCADE,
+    channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (output_id, channel_id)
+  );
+  `,
 ];
 
 // node:sqlite refuses undefined and booleans; map them to what SQLite stores.
