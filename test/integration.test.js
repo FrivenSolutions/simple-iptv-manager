@@ -1896,7 +1896,6 @@ test('sorting: categories within a source and channels within a category, by the
   assert.deepEqual(await groups(), ['ALPHA', 'OMEGA', 'MIDDLE']);
   assert.deepEqual((await names()).slice(0, 4), ['Zebra', 'Apple', 'Channel 10', 'Channel 2']);
   assert.equal((await sort({ cat_sort: 'sideways' })).status, 400);
-  assert.equal((await sort({ ch_sort: 'custom' })).status, 400, 'custom is per category');
 
   // By name: the cleaned names (the provider's would put Zebra first), numbers in natural order.
   await sort({ cat_sort: 'name', ch_sort: 'name' });
@@ -1925,6 +1924,14 @@ test('sorting: categories within a source and channels within a category, by the
   assert.deepEqual((await names()).slice(1, 5), ['Zebra', 'Channel 2', 'Apple', 'Channel 10']);
   assert.equal((await panel()).ch_sort, 'custom');
   assert.equal((await api('PUT', `/api/outputs/${o.id}/categories/${alpha.id}/channel-sort`, { mode: 'upside' })).status, 400);
+
+  // Custom for the whole output: each category starts from the order on screen; one already
+  // arranged keeps its order.
+  const omega = (await catList()).find((c) => c.name === 'AA| OMEGA');
+  await sort({ ch_sort: 'custom' });
+  assert.deepEqual((await names()).slice(1, 5), ['Zebra', 'Channel 2', 'Apple', 'Channel 10']);
+  assert.equal((await api('GET', `/api/outputs/${o.id}/channels?category_id=${omega.id}`)).data.sort_mode, 'custom');
+  await sort({ ch_sort: 'name' });
 
   // Something new from the provider goes last, flagged, and nothing moves.
   xcStreams.push({ num: 207, name: 'AA: Aardvark', stream_id: 2007, stream_icon: '', epg_channel_id: '', category_id: '41' });

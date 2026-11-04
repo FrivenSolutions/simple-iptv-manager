@@ -290,7 +290,7 @@ export function importSettings(db, data) {
           !!o.xc_enabled && !!o.xc_username && !!o.xc_password, o.xc_username || null, o.xc_password || null,
           JSON.stringify(checkNameRules(o.name_rules ?? []).rules), !!o.vod_enabled, !!o.light_enabled,
           ['needed', 'always'].includes(o.convert_mode) ? o.convert_mode : 'off',
-          ['name', 'custom'].includes(o.cat_sort) ? o.cat_sort : 'provider', o.ch_sort === 'name' ? 'name' : 'provider', !!o.paused, t, t],
+          ['name', 'custom'].includes(o.cat_sort) ? o.cat_sort : 'provider', ['name', 'custom'].includes(o.ch_sort) ? o.ch_sort : 'provider', !!o.paused, t, t],
       );
       summary.outputs++;
       (o.sources || []).forEach((ref, i) => {

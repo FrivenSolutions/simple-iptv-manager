@@ -1274,15 +1274,17 @@ async function outputEditor(main, id) {
     const box = h('div', { class: 'sort-bar' });
     const draw = () => fill(box,
       sortPicker('Sort categories', o.cat_sort, [['provider', 'Provider order'], ['name', 'Name'], ['custom', 'Custom']], (v) => resort({ cat_sort: v })),
-      withChannels ? sortPicker('Sort channels', o.ch_sort, [['provider', 'Provider order'], ['name', 'Name']], (v) => resort({ ch_sort: v })) : null,
-      h('span', { class: 'hint' }, o.cat_sort === 'custom' ? 'Drag ⠿ or use ↑ ↓, with search and filters clear. ' : '',
+      withChannels ? sortPicker('Sort channels', o.ch_sort, [['provider', 'Provider order'], ['name', 'Name'], ['custom', 'Custom']], (v) => resort({ ch_sort: v })) : null,
+      h('span', { class: 'hint' }, o.cat_sort === 'custom' || (withChannels && o.ch_sort === 'custom') ? 'Drag ⠿ or use ↑ ↓ to arrange. ' : '',
         'Names are the ones players see. This is the order of the published playlist.'));
     sortBars.push(draw);
     draw();
     return box;
   };
-  const arrangeCategory = (row, c, list, redraw) => {
-    const i = list.indexOf(c);
+  // shown: the rows on screen, which Hide excluded or a search may have thinned out. A move goes
+  // past the next one of those; rows out of sight stay where they are in the full list.
+  const arrangeCategory = (row, c, list, shown, redraw) => {
+    const i = shown.indexOf(c);
     const save = () => attempt(() => api('PUT', `/api/outputs/${id}/category-order`, { ids: list.map((x) => x.id) }));
     const before = (movedId, target) => {
       const moved = list.find((x) => x.id === movedId);
@@ -1295,8 +1297,8 @@ async function outputEditor(main, id) {
     movable(row, {
       id: c.id,
       group: `cat${c.source_id}`,
-      up: same(list[i - 1]) ? () => before(c.id, list[i - 1]) : null,
-      down: same(list[i + 1]) ? () => before(list[i + 1].id, c) : null,
+      up: same(shown[i - 1]) ? () => before(c.id, shown[i - 1]) : null,
+      down: same(shown[i + 1]) ? () => before(shown[i + 1].id, c) : null,
       drop: (movedId) => before(movedId, c),
     });
   };
@@ -1562,8 +1564,6 @@ async function outputEditor(main, id) {
     }
     summary.textContent = `${inc} of ${cats.length} categories · about ${chans} channels${dirty ? ' (preview)' : ''}`;
     const LIMIT = 500;
-    // By hand only with the whole list showing, so a row's neighbors are its real neighbors.
-    const arrange = o.cat_sort === 'custom' && !view.q && view.show === 'all' && !hideExcluded;
     fill(catBox, 
       ...withGroups(rows.slice(0, LIMIT), (c) => {
         const st = evalCat(c);
@@ -1579,7 +1579,7 @@ async function outputEditor(main, id) {
             hitLine(c)),
           h('button', { class: 'icon-btn', title: 'Edit group (display name, Jellyfin category)', onclick: () => editCategory(c, drawCats) }, '✎'),
           h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
-        if (arrange) arrangeCategory(row, c, cats, drawCats);
+        if (o.cat_sort === 'custom') arrangeCategory(row, c, cats, rows, drawCats);
         if (!view.open.has(c.id)) return row;
         return h('div', null, row, channelPanel(c));
       }),
@@ -1686,6 +1686,7 @@ async function outputEditor(main, id) {
     const chans = data.channels;
     // Arranged by hand: one column, so the order is plain to see.
     const custom = data.sort_mode === 'custom';
+    const shownChans = chans.filter((ch) => !p.hideOut || ch.included);
     const moveBefore = (movedId, target) => {
       const moved = chans.find((x) => x.id === movedId);
       chans.splice(chans.indexOf(moved), 1);
@@ -1790,7 +1791,7 @@ async function outputEditor(main, id) {
       h('div', { class: 'ch-toolbar' },
         h('span', { class: 'meta' }, `${included} of ${chans.length} channels included`),
         sortPicker('Sort', data.ch_sort || '', [
-          ['', `Same as output (${o.ch_sort === 'name' ? 'name' : 'provider order'})`],
+          ['', `Same as output (${{ name: 'name', custom: 'custom' }[o.ch_sort] || 'provider order'})`],
           ['provider', 'Provider order'], ['name', 'Name'], ['custom', 'Custom'],
         ], async (v) => {
           await attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/channel-sort`, { mode: v || null }), 'Order saved');
@@ -1806,7 +1807,7 @@ async function outputEditor(main, id) {
           h('button', { class: 'btn small', disabled: off || !overridden.length, title: 'Clear hand picks so the category and channel rules decide', onclick: () => setChannels(overridden, null) }, 'Reset to rules'))),
       h('div', { class: `ch-box ${custom ? 'one-col' : ''}` },
         // Two lines per channel: the name gets the full width; details go underneath.
-        chans.filter((ch) => !p.hideOut || ch.included).map((ch) => {
+        shownChans.map((ch, i) => {
           const name = ch.custom_name || ch.clean_name || ch.name;
           const why = !off && ch.reason !== 'category' ? reason(ch) : '';
           const now = ch.now_title ? h('span', { class: `now-title ${ch.is_guide_placeholder ? 'placeholder' : ''}`, title: `On now: ${ch.now_title}` }, `▸ ${ch.now_title}`)
@@ -1821,13 +1822,12 @@ async function outputEditor(main, id) {
                 now,
                 ch.override && !off ? h('button', { class: 'link', onclick: (e) => { e.preventDefault(); setChannels([ch.id], null); } }, 'reset') : null)
               : null);
-          if (custom && !p.hideOut) {
-            const i = chans.indexOf(ch);
+          if (custom) {
             movable(row, {
               id: ch.id,
               group: `ch${c.id}`,
-              up: i > 0 ? () => moveBefore(ch.id, chans[i - 1]) : null,
-              down: i < chans.length - 1 ? () => moveBefore(chans[i + 1].id, ch) : null,
+              up: i > 0 ? () => moveBefore(ch.id, shownChans[i - 1]) : null,
+              down: i < shownChans.length - 1 ? () => moveBefore(shownChans[i + 1].id, ch) : null,
               drop: (movedId) => moveBefore(movedId, ch),
             });
           }
@@ -2232,7 +2232,7 @@ async function outputEditor(main, id) {
               hitLine(c)),
             h('button', { class: 'icon-btn', title: 'Rename (the name players see)', onclick: () => editCategory(c, draw, { vod: true }) }, '✎'),
             h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
-          if (o.cat_sort === 'custom' && !state.q && state.show === 'all' && !hideExcluded) arrangeCategory(row, c, state.cats, draw);
+          if (o.cat_sort === 'custom') arrangeCategory(row, c, state.cats, rows, draw);
           return state.open.has(c.id) ? h('div', null, row, titlesPanel(c)) : row;
         }),
         rows.length > LIMIT ? h('p', { class: 'meta pad' }, `Showing the first ${LIMIT} of ${rows.length}. Use the search box to narrow the list.`) : null,

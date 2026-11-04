@@ -101,13 +101,17 @@ export const guidePatterns = (db) => patternSetting(db, 'guide_patterns', DEFAUL
 // How far ahead "nothing listed" looks by default, in hours.
 export const DEFAULT_UNLISTED_HOURS = 24;
 
+// Narrows a guide query to some channels, which the index can go straight to. Without it the query
+// reads the source's whole guide, far too much for one category on a big provider.
+const onlyChannels = (channels) => (channels ? ` AND channel IN (${channels.map(() => '?').join(',')})` : '');
+
 /** The first listing (with a title) starting after t and before until, per "sourceId|channel". */
-export function nextListings(db, sources, t, until) {
+export function nextListings(db, sources, t, until, channels) {
   const map = new Map();
   for (const s of sources) {
     const rows = db.all(
-      'SELECT channel, start_ts, xml FROM programmes WHERE source_id = ? AND gen = ? AND start_ts > ? AND start_ts < ? ORDER BY start_ts',
-      [s.id, s.epg_gen, t, until],
+      `SELECT channel, start_ts, xml FROM programmes WHERE source_id = ? AND gen = ?${onlyChannels(channels)} AND start_ts > ? AND start_ts < ? ORDER BY start_ts`,
+      [s.id, s.epg_gen, ...(channels || []), t, until],
     );
     for (const r of rows) {
       const key = `${s.id}|${r.channel}`;
@@ -119,12 +123,12 @@ export function nextListings(db, sources, t, until) {
   return map;
 }
 
-export function nowTitles(db, sources, t = Math.floor(Date.now() / 1000)) {
+export function nowTitles(db, sources, t = Math.floor(Date.now() / 1000), channels) {
   const map = new Map();
   for (const s of sources) {
     const rows = db.all(
-      'SELECT channel, xml FROM programmes WHERE source_id = ? AND gen = ? AND start_ts <= ? AND stop_ts > ?',
-      [s.id, s.epg_gen, t, t],
+      `SELECT channel, xml FROM programmes WHERE source_id = ? AND gen = ?${onlyChannels(channels)} AND start_ts <= ? AND stop_ts > ?`,
+      [s.id, s.epg_gen, ...(channels || []), t, t],
     );
     for (const r of rows) map.set(`${s.id}|${r.channel}`, firstText(r.xml, 'title'));
   }
@@ -145,20 +149,24 @@ export const isEmptyEvent = (name, regexes) => regexes.some((r) => r.test(String
 
 /**
  * For categories that hide by guide: what is on each channel now, and whether that title is
- * a placeholder. Looks programs up only for the sources those categories belong to.
+ * a placeholder. Looks programs up only for the sources those categories belong to, and only for
+ * `channels` (guide ids) when given.
  */
-export function guideHider(db, output, cats, t = Math.floor(Date.now() / 1000)) {
+export function guideHider(db, output, cats, t = Math.floor(Date.now() / 1000), channels) {
   const wanted = new Set(cats.filter((c) => c.hide_by_guide).map((c) => c.source_id));
-  const titles = wanted.size ? nowTitles(db, output.sources.filter((s) => wanted.has(s.id)), t) : new Map();
+  const sources = output.sources.filter((s) => wanted.has(s.id));
+  const titles = wanted.size ? nowTitles(db, sources, t, channels) : new Map();
   const regexes = wanted.size ? compilePatterns(guidePatterns(db)) : [];
   // Listings coming up, as far ahead as the longest "nothing listed" look-ahead in use.
   const aheadH = Math.max(0, ...cats.filter((c) => c.hide_by_guide).map((c) => c.unlisted_hours || DEFAULT_UNLISTED_HOURS));
   const upcoming = wanted.size && aheadH
-    ? nextListings(db, output.sources.filter((s) => wanted.has(s.id)), t, t + aheadH * 3600)
+    ? nextListings(db, sources, t, t + aheadH * 3600, channels)
     : new Map();
   // Sources whose guide has anything airing now. If a source has nothing at all, its guide has
   // run out or failed to refresh, and "nothing listed" says nothing about its channels.
-  const current = new Set([...titles.keys()].map((k) => Number(k.slice(0, k.indexOf('|')))));
+  const current = new Set(channels
+    ? sources.filter((s) => db.get('SELECT 1 FROM programmes WHERE source_id = ? AND gen = ? AND start_ts <= ? AND stop_ts > ? LIMIT 1', [s.id, s.epg_gen, t, t])).map((s) => s.id)
+    : [...titles.keys()].map((k) => Number(k.slice(0, k.indexOf('|')))));
   const titleOf = (ch) => {
     const epgId = ch.custom_epg_id || ch.epg_id;
     return epgId ? titles.get(`${ch.source_id}|${epgId}`) ?? null : null;
@@ -333,7 +341,11 @@ export const positionsOf = (db, table, column, outputId) =>
  */
 export function channelCompare(output, cat, clean, positions) {
   const mode = cat.ch_sort || output.ch_sort || 'provider';
-  const shown = (ch) => ch.custom_name || clean.channel(ch.name);
+  const names = new Map();
+  const shown = (ch) => {
+    if (!names.has(ch.id)) names.set(ch.id, ch.custom_name || clean.channel(ch.name));
+    return names.get(ch.id);
+  };
   if (mode === 'name') return (a, b) => byName(shown(a), shown(b)) || a.sort - b.sort;
   if (mode === 'custom') return (a, b) => byPosition(positions, a, b) || a.sort - b.sort;
   return (a, b) => a.sort - b.sort;

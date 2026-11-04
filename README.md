@@ -277,12 +277,13 @@ Xtream Codes login. Above the category list:
 - **Sort categories** puts the categories of each source in provider order, by name, or in a
   **Custom** order you arrange with the ⠿ handle or the ↑/↓ buttons. Sources stay in their own
   groups, in the order they're listed on the output.
-- **Sort channels** sets provider order or name for every category. Channels stay inside their
+- **Sort channels** does the same for the channels of every category. Channels stay inside their
   category.
 
-Expand a category to give it its own **Sort**, which is where **Custom** channel order lives. A
-custom list shows as one column and starts from the order on screen. Anything the provider adds
-later goes to the end, flagged **new**, and nothing else moves.
+Expand a category to give it its own **Sort**, which overrides **Sort channels** for that category.
+A custom channel list shows as one column. Custom starts from the order on screen, and with
+**Hide excluded** on or a search in the box, a move goes past the next row you can see. Anything
+the provider adds later goes to the end, flagged **new**, and nothing else moves.
 
 Sorting by name uses the names players see, after name cleanup and with any source prefix or
 suffix. Filter rules aren't affected: they still match the provider's names.

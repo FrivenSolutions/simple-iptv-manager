@@ -29,6 +29,8 @@ const IMPORT_LIMIT = 50 * 1024 * 1024;
 const LOGIN_LOCK_AFTER = 5;
 const CONVERT_MODES = ['off', 'needed', 'always'];
 const NEW_CHANNEL_S = 7 * 86400;
+// A category bigger than this looks its guide up by source: SQLite limits a query's parameters.
+const MAX_GUIDE_IDS = 5000;
 const LOGIN_LOCK_S = 60;
 
 const str = (v, max = 2000) => (v == null ? '' : String(v).trim().slice(0, max));
@@ -1163,12 +1165,13 @@ export function registerApi(router, ctx) {
          FROM channels WHERE category_id = ? AND active = 1 ORDER BY sort`,
       [catId],
     );
-    rows.sort(channelCompare(o, cat, cleanerFor(o, 'live'), positionsOf(db, 'output_channel_order', 'channel_id', o.id)));
+    const clean = cleanerFor(o, 'live');
+    rows.sort(channelCompare(o, cat, clean, positionsOf(db, 'output_channel_order', 'channel_id', o.id)));
     const firstRefresh = db.get('SELECT first_refresh_at FROM sources WHERE id = ?', [cat.source_id])?.first_refresh_at || 0;
     const emptyRegexes = compilePatterns(emptyEventPatterns(db));
-    const clean = cleanerFor(o, 'live');
     // What is on now is shown even with the toggle off, so its effect can be judged first.
-    const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }]);
+    const guideIds = [...new Set(rows.map((r) => r.custom_epg_id || r.epg_id).filter(Boolean))];
+    const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }], undefined, guideIds.length <= MAX_GUIDE_IDS ? guideIds : undefined);
     sendJson(res, 200, {
       category_included: cat.included,
       ch_sort: cat.ch_sort, // this category's own sort, null when it follows the output
@@ -1337,6 +1340,24 @@ export function registerApi(router, ctx) {
     if (!Array.isArray(ids) || !ids.every((x) => Number.isInteger(x))) throw new HttpError(400, 'ids must be a list of ids');
     return ids;
   };
+  // Going Custom for the whole output: each category that follows it and hasn't been arranged
+  // starts from the order on screen.
+  const seedChannelOrder = (o) => {
+    const clean = cleanerFor(o, 'live');
+    const positions = positionsOf(db, 'output_channel_order', 'channel_id', o.id);
+    const byCat = new Map();
+    for (const r of db.all(`SELECT id, name, custom_name, sort, category_id FROM channels
+                             WHERE active = 1 AND source_id IN (${o.sources.map(() => '?').join(',')})`, o.sources.map((s) => s.id))) {
+      if (!byCat.has(r.category_id)) byCat.set(r.category_id, []);
+      byCat.get(r.category_id).push(r);
+    }
+    const ids = evaluateCategories(db, o).filter((c) => !c.ch_sort).flatMap((c) => {
+      const rows = byCat.get(c.id) || [];
+      if (rows.some((r) => positions.has(r.id))) return [];
+      return rows.sort(channelCompare(o, c, clean, positions)).map((r) => r.id);
+    });
+    replaceOrder('output_channel_order', 'channel_id', o.id, ids);
+  };
   router.put('/api/outputs/:id/sort', async (req, res, { params }) => {
     const o = loadOutput(db, Number(params.id));
     if (!o) throw new HttpError(404, 'Not found');
@@ -1350,7 +1371,8 @@ export function registerApi(router, ctx) {
       db.run('UPDATE outputs SET cat_sort = ? WHERE id = ?', [catSort, o.id]);
     }
     if (chSort !== undefined) {
-      if (!['provider', 'name'].includes(chSort)) throw new HttpError(400, 'Unknown sort');
+      if (!['provider', 'name', 'custom'].includes(chSort)) throw new HttpError(400, 'Unknown sort');
+      if (chSort === 'custom' && o.ch_sort !== 'custom') seedChannelOrder(o);
       db.run('UPDATE outputs SET ch_sort = ? WHERE id = ?', [chSort, o.id]);
     }
     touch();
