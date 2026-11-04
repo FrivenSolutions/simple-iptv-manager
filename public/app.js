@@ -142,6 +142,12 @@ function field(label, control, hint) {
   return h('label', { class: 'field' }, h('span', { class: 'field-label' }, label), control, hint ? h('span', { class: 'hint' }, hint) : null);
 }
 
+/** A name as players see it, with the provider's name struck through after it when they differ. */
+function shownName(x) {
+  const shown = x.custom_name || x.clean_name || x.name;
+  return shown === x.name ? shown : [shown, ' ', h('s', { class: 'old-name', title: 'The provider\'s name' }, x.name)];
+}
+
 function badge(text, kind = '') {
   return h('span', { class: `badge ${kind}` }, text);
 }
@@ -1433,7 +1439,7 @@ async function outputEditor(main, id) {
         const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'}` },
           h('button', { class: 'expander', title: 'Show channels', onclick: () => { view.open.has(c.id) ? view.open.delete(c.id) : view.open.add(c.id); drawCats(); } }, view.open.has(c.id) ? '▾' : '▸'),
           h('span', { class: 'dot' }),
-          h('span', { class: 'cat-name' }, c.custom_name || c.name, c.is_new ? badge('new', 'info') : null, jellyfinBadges(c),
+          h('span', { class: 'cat-name' }, shownName(c), c.is_new ? badge('new', 'info') : null, jellyfinBadges(c),
             c.channel_rules?.length ? badge(`${c.channel_rules.length} channel rule${c.channel_rules.length === 1 ? '' : 's'}`, 'info') : null,
             c.hide_empty ? badge('hides empty events', 'info') : null,
             c.hide_by_guide ? badge(c.hide_unlisted ? 'hides by guide + unlisted' : 'hides by guide', 'info') : null,
@@ -1650,14 +1656,14 @@ async function outputEditor(main, id) {
       h('div', { class: 'ch-box' },
         // Two lines per channel: the name gets the full width; details go underneath.
         chans.filter((ch) => !p.hideOut || ch.included).map((ch) => {
-          const name = ch.custom_name || ch.name;
+          const name = ch.custom_name || ch.clean_name || ch.name;
           const why = !off && ch.reason !== 'category' ? reason(ch) : '';
           const now = ch.now_title ? h('span', { class: `now-title ${ch.is_guide_placeholder ? 'placeholder' : ''}`, title: `On now: ${ch.now_title}` }, `▸ ${ch.now_title}`)
             : ch.next ? h('span', { class: 'now-title', title: `Next: ${ch.next.title}, ${whenLocal(ch.next.start)}` }, `next ${whenLocal(ch.next.start)}: ${ch.next.title}`)
             : ch.is_unlisted ? h('span', { class: 'now-title placeholder', title: `Nothing in the guide for the next ${data.unlisted_hours} hours` }, `▸ nothing in the next ${data.unlisted_hours} h`) : null;
           return h('label', { class: `ch-row ${ch.override && !off ? 'overridden' : ''} ${ch.included ? '' : 'out'}`, 'data-name': `${ch.name}\n${ch.custom_name || ''}`, title: off ? 'Include the category first' : [name, why].filter(Boolean).join('\n') },
             h('input', { type: 'checkbox', disabled: off, checked: ch.included, onchange: (e) => setChannels([ch.id], e.target.checked ? 'include' : 'exclude') }),
-            h('span', { class: 'ch-name' }, name),
+            h('span', { class: 'ch-name' }, shownName(ch)),
             now || why || (ch.override && !off)
               ? h('span', { class: 'ch-details' },
                 why ? h('span', { class: 'ch-why' }, why) : null,
@@ -1994,11 +2000,10 @@ async function outputEditor(main, id) {
             title: off ? 'Include the category first' : [t.custom_name || t.name, t.override ? 'picked by hand' : ''].filter(Boolean).join('\n'),
           },
           h('input', { type: 'checkbox', disabled: off, checked: t.included, onchange: (e) => set({ ids: [t.id], state: e.target.checked ? 'include' : 'exclude' }) }),
-          h('span', { class: 'ch-name' }, t.custom_name || t.name),
+          h('span', { class: 'ch-name' }, shownName(t)),
           h('button', { class: 'icon-btn rename', title: 'Rename (in every output)', onclick: (e) => { e.preventDefault(); renameTitle(t, () => loadTitles(c, p)); } }, '✎'),
-          t.custom_name || (t.override && !off)
+          t.override && !off
             ? h('span', { class: 'ch-details' },
-              t.custom_name ? h('span', { class: 'ch-why' }, `provider: ${t.name}`) : null,
               t.override && !off ? h('button', { class: 'link', onclick: (e) => { e.preventDefault(); set({ ids: [t.id], state: null }); } }, 'reset') : null)
             : null)),
           list.length > LIMIT ? h('p', { class: 'meta' }, `Showing the first ${LIMIT} of ${list.length}. Type in the filter to narrow it down.`) : null,
@@ -2059,8 +2064,8 @@ async function outputEditor(main, id) {
           const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'}` },
             h('button', { class: 'expander', title: `Show the ${L.plural}`, onclick: () => { state.open.has(c.id) ? state.open.delete(c.id) : state.open.add(c.id); draw(); } }, state.open.has(c.id) ? '▾' : '▸'),
             h('span', { class: 'dot' }),
-            h('span', { class: 'cat-name' }, c.custom_name || c.name, c.is_new ? badge('new', 'info') : null,
-              h('span', { class: 'meta' }, `${c.custom_name ? ` (${c.name})` : ''} · ${c.excluded_count ? `${(c.channel_count - c.excluded_count).toLocaleString()} of ` : ''}${c.channel_count.toLocaleString()} ${c.channel_count === 1 ? L.one : L.plural} · ${reasonText(st)}`),
+            h('span', { class: 'cat-name' }, shownName(c), c.is_new ? badge('new', 'info') : null,
+              h('span', { class: 'meta' }, ` · ${c.excluded_count ? `${(c.channel_count - c.excluded_count).toLocaleString()} of ` : ''}${c.channel_count.toLocaleString()} ${c.channel_count === 1 ? L.one : L.plural} · ${reasonText(st)}`),
               hitLine(c)),
             h('button', { class: 'icon-btn', title: 'Rename (the name players see)', onclick: () => editCategory(c, draw, { vod: true }) }, '✎'),
             h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));

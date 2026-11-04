@@ -1153,6 +1153,11 @@ test('name cleanup: per-output find/replace on channel and category names, in ev
   r = await api('PUT', `/api/outputs/${o.id}`, { name_rules: rules });
   assert.deepEqual(r.data.name_rules, rules.map((x) => ({ ...x, media: 'live' })), 'rules without a target are live TV');
   assert.deepEqual((await m3u()).sort(), [['Daily News', 'News & Talk', 'Daily News'], ['NewsNet', 'News & Talk', 'NewsNet']]);
+  // The output's page gets the cleaned names too, to show them beside the provider's.
+  const shown = (await api('GET', `/api/outputs/${o.id}/categories`)).data.find((c) => c.name === 'US| NEWS' && c.source_id === xcId);
+  assert.equal(shown.clean_name, 'News & Talk');
+  const listed = (await api('GET', `/api/outputs/${o.id}/channels?category_id=${shown.id}`)).data.channels;
+  assert.deepEqual(listed.map((c) => [c.name, c.clean_name]).sort(), [['US: Daily News', 'Daily News'], ['US: NewsNet HD', 'NewsNet']]);
   const xc = (action) => fetch(`${base}/player_api.php?username=tidy&password=pw&action=${action}`).then((x) => x.json());
   assert.deepEqual((await xc('get_live_categories')).map((c) => c.category_name), ['News & Talk']);
   assert.deepEqual((await xc('get_live_streams')).map((s) => s.name).sort(), ['Daily News', 'NewsNet']);

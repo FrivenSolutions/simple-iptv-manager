@@ -156,6 +156,9 @@ export function validatePatterns(list) {
   });
 }
 
+/** The output's saved name cleanup, for live TV or for movies and series. */
+const cleanerFor = (o, kind) => nameCleaner(checkNameRules(parseNameRules(o.name_rules)).rules || [], kind === 'live' ? 'live' : 'vod');
+
 function outputUrls(req, ctx, o) {
   const base = baseUrl(req, ctx.db.getSetting('base_url'));
   return {
@@ -1056,7 +1059,8 @@ export function registerApi(router, ctx) {
     const o = loadOutput(db, Number(params.id));
     if (!o) throw new HttpError(404, 'Not found');
     const kind = ['movie', 'series'].includes(query.get('kind')) ? query.get('kind') : 'live';
-    sendJson(res, 200, evaluateCategories(db, o, kind));
+    const clean = cleanerFor(o, kind);
+    sendJson(res, 200, evaluateCategories(db, o, kind).map((c) => ({ ...c, clean_name: clean.category(c.name) })));
   });
 
   // The titles of one movie or series category in an output, each with its hand pick (if any)
@@ -1069,6 +1073,7 @@ export function registerApi(router, ctx) {
     const cat = evaluateCategories(db, o, c.kind).find((x) => x.id === c.id);
     if (!cat) throw new HttpError(404, 'Category is not part of this output');
     const LIMIT = 5000;
+    const clean = cleanerFor(o, c.kind);
     const rows = db.all(
       `SELECT v.id, v.name, v.custom_name, x.state AS override FROM vod_items v
          LEFT JOIN output_vod_overrides x ON x.item_id = v.id AND x.output_id = ?
@@ -1079,7 +1084,7 @@ export function registerApi(router, ctx) {
       category_included: cat.included,
       total: cat.channel_count,
       truncated: rows.length > LIMIT,
-      titles: rows.slice(0, LIMIT).map((r) => ({ ...r, included: cat.included && r.override !== 'exclude' })),
+      titles: rows.slice(0, LIMIT).map((r) => ({ ...r, clean_name: clean.channel(r.name), included: cat.included && r.override !== 'exclude' })),
     });
   });
 
@@ -1154,6 +1159,7 @@ export function registerApi(router, ctx) {
       [catId],
     );
     const emptyRegexes = compilePatterns(emptyEventPatterns(db));
+    const clean = cleanerFor(o, 'live');
     // What is on now is shown even with the toggle off, so its effect can be judged first.
     const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }]);
     sendJson(res, 200, {
@@ -1170,6 +1176,7 @@ export function registerApi(router, ctx) {
         const ch = { ...r, source_id: cat.source_id };
         return {
           ...r, override,
+          clean_name: clean.channel(r.name),
           is_empty_event: isEmptyEvent(r.name, emptyRegexes),
           now_title: guide.titleOf(ch),
           is_guide_placeholder: guide.isPlaceholder(ch),
