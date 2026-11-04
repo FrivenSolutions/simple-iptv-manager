@@ -1838,6 +1838,34 @@ test('a lone viewer that stops reading makes the proxy wait (the provider holds 
   }
 });
 
+test('rules go by the provider\'s names, whatever name cleanup, renames and prefixes make of them', async () => {
+  const o = (await api('POST', '/api/outputs', { name: 'Raw names' })).data;
+  const save = (rule) => api('PUT', `/api/outputs/${o.id}`, {
+    source_ids: [xcId], source_affixes: { [xcId]: { cat_prefix: 'UK |', cat_suffix: '[P]' } },
+    rules: [{ action: 'include', op: 'equals', value: rule }],
+    name_rules: [{ scope: 'both', find: '^US[:|]+ ?', replace: '' }],
+  });
+  const channels = async () => [...(await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text()).matchAll(/group-title="([^"]*)"[^,]*,([^\n]+)\n/g)].map((m) => [m[1], m[2]]);
+  try {
+    await save('us| news');
+    assert.deepEqual((await channels()).sort(), [['UK | NEWS [P]', 'Daily News'], ['UK | NEWS [P]', 'NewsNet HD']], 'matched by the provider\'s name, published with the new ones');
+    await save('uk | news [p]');
+    assert.deepEqual(await channels(), [], 'the published name doesn\'t match');
+    await save('news');
+    assert.deepEqual(await channels(), [], 'nor does the cleaned one');
+
+    await save('us| news');
+    const cat = (await api('GET', `/api/outputs/${o.id}/categories`)).data.find((c) => c.name === 'US| NEWS' && c.source_id === xcId);
+    const rule = (value) => api('PUT', `/api/outputs/${o.id}/categories/${cat.id}/channel-rules`, { rules: [{ action: 'exclude', op: 'starts_with', value }] });
+    await rule('newsnet');
+    assert.equal((await channels()).length, 2, 'a channel rule on the cleaned name matches nothing');
+    await rule('us: newsnet');
+    assert.deepEqual((await channels()).map((c) => c[1]), ['Daily News'], 'one on the provider\'s name does');
+  } finally {
+    await api('DELETE', `/api/outputs/${o.id}`);
+  }
+});
+
 test('a proxied stream the provider turns down is logged with why, once a minute, and shown on the source', async () => {
   const o = (await api('POST', '/api/outputs', { name: 'Refusals' })).data;
   await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy', source_ids: [xcId, m3uId], rules: [{ action: 'include', op: 'equals', value: 'us| news' }] });

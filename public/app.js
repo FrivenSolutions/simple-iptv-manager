@@ -144,7 +144,7 @@ function field(label, control, hint) {
 
 /** A name as players see it, with the provider's name struck through after it when they differ. */
 function shownName(x) {
-  const shown = x.custom_name || x.clean_name || x.name;
+  const shown = x.shown || x.custom_name || x.clean_name || x.name;
   return shown === x.name ? shown : [shown, ' ', h('s', { class: 'old-name', title: 'The provider\'s name' }, x.name)];
 }
 
@@ -1174,6 +1174,12 @@ async function outputEditor(main, id) {
   // Text around the names of a source's categories in this output ("UK | News"), set from its
   // row under Sources or its heading in a category list, and saved with the output.
   const affixed = (src, name) => [src.cat_prefix.trim(), name, src.cat_suffix.trim()].filter(Boolean).join(' ');
+  // A category as players will see it, with its source's prefix and suffix (as edited, even unsaved).
+  // For showing only: rules go by the provider's name.
+  const withAffix = (c) => {
+    const src = draft.sources.find((x) => x.id === c.source_id);
+    return src ? { ...c, shown: affixed(src, c.custom_name || c.clean_name || c.name) } : c;
+  };
   const affixNote = (src) => (src.cat_prefix.trim() || src.cat_suffix.trim() ? ` · shown as ${affixed(src, '…')}` : '');
   const editAffix = (src) => {
     const sample = cats.find((c) => c.source_id === src.id);
@@ -1473,7 +1479,7 @@ async function outputEditor(main, id) {
         const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'}` },
           h('button', { class: 'expander', title: 'Show channels', onclick: () => { view.open.has(c.id) ? view.open.delete(c.id) : view.open.add(c.id); drawCats(); } }, view.open.has(c.id) ? '▾' : '▸'),
           h('span', { class: 'dot' }),
-          h('span', { class: 'cat-name' }, shownName(c), c.is_new ? badge('new', 'info') : null, jellyfinBadges(c),
+          h('span', { class: 'cat-name' }, shownName(withAffix(c)), c.is_new ? badge('new', 'info') : null, jellyfinBadges(c),
             c.channel_rules?.length ? badge(`${c.channel_rules.length} channel rule${c.channel_rules.length === 1 ? '' : 's'}`, 'info') : null,
             c.hide_empty ? badge('hides empty events', 'info') : null,
             c.hide_by_guide ? badge(c.hide_unlisted ? 'hides by guide + unlisted' : 'hides by guide', 'info') : null,
@@ -2098,7 +2104,7 @@ async function outputEditor(main, id) {
           const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'}` },
             h('button', { class: 'expander', title: `Show the ${L.plural}`, onclick: () => { state.open.has(c.id) ? state.open.delete(c.id) : state.open.add(c.id); draw(); } }, state.open.has(c.id) ? '▾' : '▸'),
             h('span', { class: 'dot' }),
-            h('span', { class: 'cat-name' }, shownName(c), c.is_new ? badge('new', 'info') : null,
+            h('span', { class: 'cat-name' }, shownName(withAffix(c)), c.is_new ? badge('new', 'info') : null,
               h('span', { class: 'meta' }, ` · ${c.excluded_count ? `${(c.channel_count - c.excluded_count).toLocaleString()} of ` : ''}${c.channel_count.toLocaleString()} ${c.channel_count === 1 ? L.one : L.plural} · ${reasonText(st)}`),
               hitLine(c)),
             h('button', { class: 'icon-btn', title: 'Rename (the name players see)', onclick: () => editCategory(c, draw, { vod: true }) }, '✎'),
