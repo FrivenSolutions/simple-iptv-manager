@@ -8,7 +8,7 @@ import { hashPassword, verifyPassword, makeSession, sessionCookie, randomToken, 
 import {
   OPS, loadOutput, evaluateCategories, channelCompare, positionsOf, isNewCategory, channelState,
   DEFAULT_EMPTY_EVENT_PATTERNS, emptyEventPatterns, compilePatterns, isEmptyEvent,
-  DEFAULT_GUIDE_PATTERNS, guidePatterns, guideHider, hiddenReason,
+  DEFAULT_GUIDE_PATTERNS, guidePatterns, guideHider, guideIdsOf, hiddenReason,
   checkNameRules, parseNameRules, nameCleaner, nowTitles, affixText,
 } from './filters.js';
 import { rematchSource } from './ingest.js';
@@ -29,8 +29,6 @@ const IMPORT_LIMIT = 50 * 1024 * 1024;
 const LOGIN_LOCK_AFTER = 5;
 const CONVERT_MODES = ['off', 'needed', 'always'];
 const NEW_CHANNEL_S = 7 * 86400;
-// A category bigger than this looks its guide up by source: SQLite limits a query's parameters.
-const MAX_GUIDE_IDS = 5000;
 const LOGIN_LOCK_S = 60;
 
 const str = (v, max = 2000) => (v == null ? '' : String(v).trim().slice(0, max));
@@ -173,7 +171,8 @@ function outputUrls(req, ctx, o) {
 }
 
 function outputView(req, ctx, o, withDetail = false) {
-  const sel = ctx.selection(o.id);
+  // Only for the counts, so opening a page never waits on the guide.
+  const sel = ctx.selection(o.id, { anyOld: true });
   const view = {
     id: o.id,
     name: o.name,
@@ -460,7 +459,7 @@ export function registerApi(router, ctx) {
     const list = ctx.viewers.list();
     const ids = [...new Set(list.filter((v) => v.epg_id && v.source_id).map((v) => v.source_id))];
     const onNow = ids.length
-      ? nowTitles(db, db.all(`SELECT id, epg_gen FROM sources WHERE id IN (${ids.map(() => '?').join(',')})`, ids))
+      ? nowTitles(db, db.all(`SELECT id, epg_gen FROM sources WHERE id IN (${ids.map(() => '?').join(',')})`, ids), undefined, list.map((v) => v.epg_id).filter(Boolean))
       : new Map();
     sendJson(res, 200, list.map(({ source_id: sid, epg_id: epg, ...v }) => ({ ...v, program: epg ? onNow.get(`${sid}|${epg}`) || null : null })));
   });
@@ -474,7 +473,7 @@ export function registerApi(router, ctx) {
   router.get('/api/outputs/:id/lineup', (req, res, { params }) => {
     const sel = ctx.selection(Number(params.id));
     if (!sel) throw new HttpError(404, 'Not found');
-    const onNow = nowTitles(db, sel.output.sources);
+    const onNow = nowTitles(db, sel.output.sources, undefined, [...new Set(sel.channels.map((ch) => ch.epg_id).filter(Boolean))]);
     sendJson(res, 200, {
       paused: !!sel.output.paused,
       // A channel's stream for player apps (VLC and the like) is this plus "<id>.ts": the output's
@@ -1176,8 +1175,7 @@ export function registerApi(router, ctx) {
     const firstRefresh = db.get('SELECT first_refresh_at FROM sources WHERE id = ?', [cat.source_id])?.first_refresh_at || 0;
     const emptyRegexes = compilePatterns(emptyEventPatterns(db));
     // What is on now is shown even with the toggle off, so its effect can be judged first.
-    const guideIds = [...new Set(rows.map((r) => r.custom_epg_id || r.epg_id).filter(Boolean))];
-    const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }], undefined, guideIds.length <= MAX_GUIDE_IDS ? guideIds : undefined);
+    const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }], undefined, guideIdsOf(rows));
     sendJson(res, 200, {
       category_included: cat.included,
       ch_sort: cat.ch_sort, // this category's own sort, null when it follows the output

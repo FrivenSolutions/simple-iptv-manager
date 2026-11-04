@@ -90,19 +90,20 @@ export function createApp({
     isAuthed: (req) => checkSession(req, ctx.secret, ctx.sessionGen()),
     secureCookies: (req) => req.socket.encrypted || String(req.headers['x-forwarded-proto'] || '').startsWith('https'),
     /**
-     * Resolved channel list for an output, cached until the next data change, and for at most
-     * a minute: hiding channels by what the guide says is on now changes the list over time.
+     * Resolved channel list for an output, cached until the next data change. With a category
+     * hiding channels by what the guide says is on now, the list changes over time too, so for
+     * at most a minute, unless anyOld says a list a little behind the guide will do.
      */
-    selection(outputId) {
+    selection(outputId, { anyOld = false } = {}) {
       const minute = Math.floor(Date.now() / 60_000);
       const hit = selections.get(outputId);
-      if (hit && hit.version === version && hit.minute === minute) return hit.sel;
+      if (hit && hit.version === version && (anyOld || !hit.timed || hit.minute === minute)) return hit.sel;
       const output = loadOutput(db, outputId);
       if (!output) return null;
-      const { channels } = selectChannels(db, output);
+      const { categories, channels } = selectChannels(db, output);
       const signature = crypto.createHash('sha1').update(channels.map((c) => c.id).join(',')).digest('hex').slice(0, 12);
       const sel = { output, channels, signature, byId: new Map(channels.map((c) => [c.id, c])) };
-      selections.set(outputId, { version, minute, sel });
+      selections.set(outputId, { version, minute, timed: categories.some((c) => c.hide_by_guide), sel });
       return sel;
     },
     /**

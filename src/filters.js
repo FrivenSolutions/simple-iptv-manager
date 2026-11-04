@@ -103,7 +103,9 @@ export const DEFAULT_UNLISTED_HOURS = 24;
 
 // Narrows a guide query to some channels, which the index can go straight to. Without it the query
 // reads the source's whole guide, far too much for one category on a big provider.
-const onlyChannels = (channels) => (channels ? ` AND channel IN (${channels.map(() => '?').join(',')})` : '');
+// One JSON parameter, as a list can be longer than SQLite's limit on parameters.
+const onlyChannels = (channels) => (channels ? ' AND channel IN (SELECT value FROM json_each(?))' : '');
+const channelParam = (channels) => (channels ? [JSON.stringify(channels)] : []);
 
 /** The first listing (with a title) starting after t and before until, per "sourceId|channel". */
 export function nextListings(db, sources, t, until, channels) {
@@ -111,7 +113,7 @@ export function nextListings(db, sources, t, until, channels) {
   for (const s of sources) {
     const rows = db.all(
       `SELECT channel, start_ts, xml FROM programmes WHERE source_id = ? AND gen = ?${onlyChannels(channels)} AND start_ts > ? AND start_ts < ? ORDER BY start_ts`,
-      [s.id, s.epg_gen, ...(channels || []), t, until],
+      [s.id, s.epg_gen, ...channelParam(channels), t, until],
     );
     for (const r of rows) {
       const key = `${s.id}|${r.channel}`;
@@ -128,7 +130,7 @@ export function nowTitles(db, sources, t = Math.floor(Date.now() / 1000), channe
   for (const s of sources) {
     const rows = db.all(
       `SELECT channel, xml FROM programmes WHERE source_id = ? AND gen = ?${onlyChannels(channels)} AND start_ts <= ? AND stop_ts > ?`,
-      [s.id, s.epg_gen, ...(channels || []), t, t],
+      [s.id, s.epg_gen, ...channelParam(channels), t, t],
     );
     for (const r of rows) map.set(`${s.id}|${r.channel}`, firstText(r.xml, 'title'));
   }
@@ -146,6 +148,9 @@ export function compilePatterns(list) {
 }
 
 export const isEmptyEvent = (name, regexes) => regexes.some((r) => r.test(String(name || '')));
+
+/** The guide ids of some channels, for looking just those up. */
+export const guideIdsOf = (channels) => [...new Set(channels.map((ch) => ch.custom_epg_id || ch.epg_id).filter(Boolean))];
 
 /**
  * For categories that hide by guide: what is on each channel now, and whether that title is
@@ -419,7 +424,6 @@ export function selectChannels(db, output) {
   );
   const srcById = new Map(output.sources.map((s) => [s.id, s]));
   const emptyRegexes = compilePatterns(emptyEventPatterns(db));
-  const guide = guideHider(db, output, cats);
   const guideIcons = guideIconLookup(db, srcById);
   const clean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || []);
   const affix = categoryAffixer(output);
@@ -429,6 +433,7 @@ export function selectChannels(db, output) {
     `SELECT * FROM channels WHERE active = 1 AND source_id IN (${ids.map(() => '?').join(',')})`,
     ids,
   );
+  const guide = guideHider(db, output, cats, undefined, guideIdsOf(rows.filter((ch) => catById.get(ch.category_id)?.hide_by_guide)));
 
   const channels = [];
   for (const ch of rows) {
