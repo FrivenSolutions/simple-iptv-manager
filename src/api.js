@@ -706,6 +706,12 @@ export function registerApi(router, ctx) {
   router.delete('/api/sources/:id', (req, res, { params }) => {
     const s = mustGet(db, 'sources', params.id);
     db.run('DELETE FROM sources WHERE id = ?', [s.id]);
+    // Its id may be given to a later source, which mustn't inherit name rules aimed at this one.
+    for (const o of db.all('SELECT id, name_rules FROM outputs')) {
+      const rules = parseNameRules(o.name_rules);
+      const kept = rules.filter((r) => r.source !== s.id);
+      if (kept.length < rules.length) db.run('UPDATE outputs SET name_rules = ? WHERE id = ?', [JSON.stringify(kept), o.id]);
+    }
     const dir = path.join(ctx.dataDir, 'uploads');
     for (const kind of ['m3u', 'epg']) fs.rm(path.join(dir, `source-${s.id}-${kind}`), { force: true }, () => {});
     touch();
@@ -1067,7 +1073,7 @@ export function registerApi(router, ctx) {
     if (!o) throw new HttpError(404, 'Not found');
     const kind = ['movie', 'series'].includes(query.get('kind')) ? query.get('kind') : 'live';
     const clean = cleanerFor(o, kind);
-    sendJson(res, 200, evaluateCategories(db, o, kind).map((c) => ({ ...c, clean_name: clean.category(c.name) })));
+    sendJson(res, 200, evaluateCategories(db, o, kind).map((c) => ({ ...c, clean_name: clean.category(c.name, c.source_id) })));
   });
 
   // The titles of one movie or series category in an output, each with its hand pick (if any)
@@ -1091,7 +1097,7 @@ export function registerApi(router, ctx) {
       category_included: cat.included,
       total: cat.channel_count,
       truncated: rows.length > LIMIT,
-      titles: rows.slice(0, LIMIT).map((r) => ({ ...r, clean_name: clean.channel(r.name), included: cat.included && r.override !== 'exclude' })),
+      titles: rows.slice(0, LIMIT).map((r) => ({ ...r, clean_name: clean.channel(r.name, c.source_id), included: cat.included && r.override !== 'exclude' })),
     });
   });
 
@@ -1188,7 +1194,7 @@ export function registerApi(router, ctx) {
         const ch = { ...r, source_id: cat.source_id };
         return {
           ...r, override,
-          clean_name: clean.channel(r.name),
+          clean_name: clean.channel(r.name, cat.source_id),
           // Added since the source's first refresh, in the last week.
           is_new: r.first_seen > firstRefresh + 60 && r.first_seen > now() - NEW_CHANNEL_S,
           is_empty_event: isEmptyEvent(r.name, emptyRegexes),
@@ -1214,10 +1220,10 @@ export function registerApi(router, ctx) {
     const vodClean = nameCleaner(checked.rules, 'vod');
     const cats = evaluateCategories(db, o).filter((c) => c.included);
     const SAMPLES = 8;
-    const tally = (names, fn) => {
-      const out = { changed: 0, total: names.length, samples: [] };
-      for (const name of names) {
-        const after = fn(name);
+    const tally = (items, fn) => {
+      const out = { changed: 0, total: items.length, samples: [] };
+      for (const { name, source_id: source } of items) {
+        const after = fn(name, source);
         if (after === name) continue;
         out.changed++;
         if (out.samples.length < SAMPLES) out.samples.push([name, after]);
@@ -1226,10 +1232,10 @@ export function registerApi(router, ctx) {
     };
     const chNames = cats.length
       ? db.all(
-        `SELECT name FROM channels WHERE active = 1 AND custom_name IS NULL AND category_id IN (${cats.map(() => '?').join(',')})
+        `SELECT name, source_id FROM channels WHERE active = 1 AND custom_name IS NULL AND category_id IN (${cats.map(() => '?').join(',')})
           ORDER BY category_id, sort`,
         cats.map((c) => c.id),
-      ).map((r) => r.name)
+      )
       : [];
     // Movies and series, when the output includes them: titles and categories currently in it.
     let vod = null;
@@ -1237,18 +1243,18 @@ export function registerApi(router, ctx) {
       const vodCats = [...evaluateCategories(db, o, 'movie'), ...evaluateCategories(db, o, 'series')].filter((c) => c.included);
       const titles = vodCats.length
         ? db.all(
-          `SELECT name FROM vod_items WHERE active = 1 AND custom_name IS NULL AND category_id IN (${vodCats.map(() => '?').join(',')}) ORDER BY category_id, sort`,
+          `SELECT name, source_id FROM vod_items WHERE active = 1 AND custom_name IS NULL AND category_id IN (${vodCats.map(() => '?').join(',')}) ORDER BY category_id, sort`,
           vodCats.map((c) => c.id),
-        ).map((r) => r.name)
+        )
         : [];
       vod = {
         titles: tally(titles, vodClean.channel),
-        categories: tally(vodCats.filter((c) => !c.custom_name).map((c) => c.name), vodClean.category),
+        categories: tally(vodCats.filter((c) => !c.custom_name), vodClean.category),
       };
     }
     sendJson(res, 200, {
       channels: tally(chNames, clean.channel),
-      categories: tally(cats.filter((c) => !c.custom_name).map((c) => c.name), clean.category),
+      categories: tally(cats.filter((c) => !c.custom_name), clean.category),
       vod,
     });
   });

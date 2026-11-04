@@ -420,7 +420,7 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; backgr
 
 /* --- name cleanup (advanced) */
 .name-rules { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-.name-rule { display: grid; grid-template-columns: 160px minmax(0, 1.4fr) auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; background: var(--panel-2); }
+.name-rule { display: grid; grid-template-columns: 200px minmax(0, 1.4fr) auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; background: var(--panel-2); }
 .name-rule select { width: auto; }
 .name-targets { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .name-targets select { width: 100%; }

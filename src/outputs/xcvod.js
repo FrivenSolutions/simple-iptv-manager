@@ -24,10 +24,10 @@ function providerApi(src) {
 
 // Names as players see them: a name set by hand, else the provider's after the output's name
 // cleanup, then wrapped in the source's category prefix and suffix.
-const catName = (vc, c) => vc.affix(c.source_id, c.custom_name || vc.clean.category(c.name));
-const title = (vc, name) => vc.clean.channel(name);
+const catName = (vc, c) => vc.affix(c.source_id, c.custom_name || vc.clean.category(c.name, c.source_id));
+const title = (vc, name, source) => vc.clean.channel(name, source);
 // A title's own display name (set by hand) wins over name cleanup.
-const itemName = (vc, r) => r.custom_name || title(vc, r.name);
+const itemName = (vc, r) => r.custom_name || title(vc, r.name, r.source_id);
 
 /** Included categories of a kind that hold at least one title that is in. */
 export function vodCategoryList(vc) {
@@ -39,7 +39,7 @@ function itemsOf(db, vc, categoryId) {
   const ids = categoryId ? [Number(categoryId)].filter((id) => vc.included.has(id)) : [...vc.included];
   if (!ids.length) return [];
   return db.all(
-    `SELECT id, category_id, name, custom_name, poster, ext, added, extra FROM vod_items
+    `SELECT id, source_id, category_id, name, custom_name, poster, ext, added, extra FROM vod_items
       WHERE active = 1 AND category_id IN (${ids.map(() => '?').join(',')})`,
     ids,
   ).filter((r) => !vc.excluded.has(r.id)).sort((a, b) => vc.order.get(a.category_id) - vc.order.get(b.category_id) || 0);
@@ -147,7 +147,7 @@ export async function seriesInfo(db, vc, id) {
       ...raw,
       id: String(e.id),
       episode_num: e.episode ?? raw.episode_num ?? 0,
-      title: title(vc, e.title || raw.title || ''),
+      title: title(vc, e.title || raw.title || '', it.source_id),
       container_extension: e.ext || 'mp4',
       season: e.season ?? 1,
       info: raw.info && typeof raw.info === 'object' ? raw.info : {},

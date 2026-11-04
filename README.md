@@ -470,10 +470,10 @@ off hides them again; anything already set up keeps working.
   **Country prefix** and **Quality tags** presets are included, and a preview shows how many names
   change, with examples. Names you set by hand are never changed, and a name that would end up
   empty keeps its original. The cleaned names are used in the M3U, the XMLTV guide and the Xtream
-  Codes login alike. On an output with movies and series, each rule also says where it applies:
-  **Live TV**, **Movies & series** (titles and their categories) or **Everywhere**. Rules made
-  before that apply to live TV. With advanced options off, an output with rules shows one line
-  saying so.
+  Codes login alike. On an output with movies and series or more than one source, each rule
+  also says where it applies: **Live TV** or **Movies & series** (titles and their categories),
+  from all sources or just one, or **Everywhere**. Rules made before that apply to live TV. With
+  advanced options off, an output with rules shows one line saying so.
 
 ### Watch
 

@@ -288,7 +288,9 @@ export function importSettings(db, data) {
         [String(o.name || 'Output'), o.token, o.stream_mode, !!o.include_all, o.include_all_movie ?? !!o.include_all,
           o.include_all_series ?? !!o.include_all, o.number_start ?? null, Number(o.epg_days) || 7,
           !!o.xc_enabled && !!o.xc_username && !!o.xc_password, o.xc_username || null, o.xc_password || null,
-          JSON.stringify(checkNameRules(o.name_rules ?? []).rules), !!o.vod_enabled, !!o.light_enabled,
+          // A rule aimed at a source follows it to its new id; one whose source is gone did nothing.
+          JSON.stringify(checkNameRules(o.name_rules ?? []).rules.filter((x) => x.source == null || ids.has(x.source))
+            .map((x) => (x.source == null ? x : { ...x, source: ids.get(x.source) }))), !!o.vod_enabled, !!o.light_enabled,
           ['needed', 'always'].includes(o.convert_mode) ? o.convert_mode : 'off',
           ['name', 'custom'].includes(o.cat_sort) ? o.cat_sort : 'provider', ['name', 'custom'].includes(o.ch_sort) ? o.ch_sort : 'provider', !!o.paused, t, t],
       );

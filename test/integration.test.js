@@ -1866,6 +1866,57 @@ test('rules go by the provider\'s names, whatever name cleanup, renames and pref
   }
 });
 
+test('name cleanup aimed at one source leaves the others alone, in previews and backups too', async () => {
+  const list = (n) => `#EXTM3U\n#EXTINF:-1 tvg-id="" group-title="US │ Entertainment",US │ ${n}\nhttp://example.invalid/${n}.ts\n`;
+  const server = http.createServer((req, res) => res.end(list(req.url.slice(1)))).listen(0);
+  await new Promise((r) => server.once('listening', r));
+  const at = (n) => `http://127.0.0.1:${server.address().port}/${n}`;
+  try {
+    const a = (await api('POST', '/api/sources', { name: 'One', type: 'm3u', url: at('Alpha') })).data;
+    const b = (await api('POST', '/api/sources', { name: 'Two', type: 'm3u', url: at('Beta') })).data;
+    const gone = (await api('POST', '/api/sources', { name: 'Three', type: 'm3u', url: at('Gamma') })).data;
+    await app.ctx.jobs.idle();
+    const o = (await api('POST', '/api/outputs', { name: 'Per source' })).data;
+    const prefix = { scope: 'both', media: 'live', source: a.id, find: '^\\|?[A-Z]{2,3}\\s*[|│┃｜:\\-–—]\\s*', replace: '' };
+    const rules = [prefix, { ...prefix, source: gone.id }];
+    assert.equal((await api('PUT', `/api/outputs/${o.id}`, { name_rules: [{ ...prefix, source: 'One' }] })).status, 400);
+    await api('PUT', `/api/outputs/${o.id}`, { source_ids: [a.id, b.id], include_all: true, name_rules: rules });
+
+    const m3u = await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text();
+    assert.match(m3u, /group-title="Entertainment",Alpha/);
+    assert.match(m3u, /group-title="US │ Entertainment",US │ Beta/);
+    const preview = (await api('POST', `/api/outputs/${o.id}/name-preview`, { rules })).data;
+    assert.deepEqual([preview.channels.changed, preview.channels.total], [1, 2]);
+    assert.deepEqual(preview.categories.samples, [['US │ Entertainment', 'Entertainment']]);
+    const shown = (await api('GET', `/api/outputs/${o.id}/categories`)).data;
+    assert.deepEqual(shown.map((c) => c.clean_name), ['Entertainment', 'US │ Entertainment']);
+
+    // A deleted source takes its rules along: its id could go to a later source.
+    await api('DELETE', `/api/sources/${gone.id}`);
+    assert.deepEqual((await api('GET', `/api/outputs/${o.id}`)).data.name_rules, [prefix]);
+
+    // A restore gives sources new ids, and the rule follows its source.
+    const file = (await api('GET', '/api/export')).data;
+    const dbFile = path.join(os.tmpdir(), `iptvm-names-${process.pid}.db`);
+    const db2 = openDb(dbFile);
+    try {
+      db2.run("INSERT INTO sources (id, name, type) VALUES (900, 'In the way', 'm3u')");
+      const { sourceIds } = importSettings(db2, file);
+      const saved = JSON.parse(db2.get('SELECT name_rules FROM outputs WHERE token = ?', [o.token]).name_rules);
+      assert.equal(db2.get('SELECT name FROM sources WHERE id = ?', [saved[0].source]).name, 'One');
+      assert.ok(sourceIds);
+    } finally {
+      db2.close();
+      for (const f of [dbFile, `${dbFile}-wal`, `${dbFile}-shm`]) fs.rmSync(f, { force: true });
+    }
+    await api('DELETE', `/api/outputs/${o.id}`);
+    await api('DELETE', `/api/sources/${a.id}`);
+    await api('DELETE', `/api/sources/${b.id}`);
+  } finally {
+    server.close();
+  }
+});
+
 test('sorting: categories within a source and channels within a category, by the names players see or by hand, in everything published', async () => {
   xcCats.push({ category_id: '41', category_name: 'ZZ| ALPHA' }, { category_id: '42', category_name: 'AA| OMEGA' }, { category_id: '43', category_name: 'MM| MIDDLE' });
   xcStreams.push(

@@ -1375,7 +1375,7 @@ async function outputEditor(main, id) {
   const sourcesBox = h('div', { class: 'source-list' });
   const drawSources = () => {
     fill(sourcesBox, ...draft.sources.map((s, i) => h('div', { class: 'source-row' },
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s.attached, onchange: (e) => { s.attached = e.target.checked; markDirty(); drawSources(); } }), ' ', s.name, ' ',
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s.attached, onchange: (e) => { s.attached = e.target.checked; markDirty(); drawSources(); if (settings.advanced) drawNames(); } }), ' ', s.name, ' ',
         h('span', { class: 'meta' }, TYPE_LABELS[s.type], s.attached ? affixNote(s) : '')),
       h('span', { class: 'row' },
         s.attached ? h('button', { class: 'icon-btn', title: 'Category name prefix and suffix', onclick: () => editAffix(s) }, '✎') : null,
@@ -1423,8 +1423,8 @@ async function outputEditor(main, id) {
 
   // --- name cleanup (an advanced option; hidden otherwise)
   const NAME_PRESETS = [
-    ['Country prefix', 'Removes "US| ", "UK: " or "CA - " at the start of a name',
-      { scope: 'channel', find: '^\\|?[A-Z]{2,3}\\s*[|:\\-]\\s*', replace: '' }],
+    ['Country prefix', 'Removes "US| ", "UK: ", "CA - " or "US │ " at the start of a channel or category name',
+      { scope: 'both', find: '^\\|?[A-Z]{2,3}\\s*[|│┃｜:\\-–—]\\s*', replace: '' }],
     ['Quality tags', 'Removes HD, FHD, UHD, 4K, HEVC, [SD], ᴴᴰ and similar',
       { scope: 'channel', find: '\\s*(?:[\\[(](?:UHD|FHD|HD|SD|4K|HEVC)[\\])]|\\b(?:UHD|FHD|HD|4K|HEVC|H\\.?26[45]|\\d{2,3}FPS)\\b|ᵁᴴᴰ|ᶠᴴᴰ|ᴴᴰ|ᴿᴬᵂ|⁶⁰ᶠᵖˢ|ˢᴰ)', replace: '' }],
   ];
@@ -1464,6 +1464,21 @@ async function outputEditor(main, id) {
     markDirty();
     previewNames();
   };
+  // Where a rule can apply: everything of a kind, or one source's (with more than one to tell apart).
+  const nameTargets = (r) => {
+    const sources = draft.sources.filter((s) => s.attached);
+    const kind = (media, label) => [
+      [`${media}|`, sources.length > 1 ? `${label} (all)` : label],
+      ...(sources.length > 1 ? sources.map((s) => [`${media}|${s.id}`, `${label} (${s.name})`]) : []),
+    ];
+    const list = [...kind('live', 'Live TV'), ...(draft.vod_enabled || r.media === 'vod' ? kind('vod', 'Movies & series') : []), ['all|', 'Everywhere']];
+    const value = `${r.media || 'live'}|${r.source || ''}`;
+    // Aimed at a source that has since been taken off this output: it does nothing until it's back.
+    if (!list.some(([v]) => v === value)) {
+      list.push([value, `${r.media === 'vod' ? 'Movies & series' : 'Live TV'} (${draft.sources.find((s) => s.id === r.source)?.name || 'removed source'})`]);
+    }
+    return { list, value };
+  };
   const drawNames = () => {
     const move = (i, d) => {
       [draft.name_rules[i], draft.name_rules[i + d]] = [draft.name_rules[i + d], draft.name_rules[i]];
@@ -1479,9 +1494,17 @@ async function outputEditor(main, id) {
     fill(namesBox,
       draft.name_rules.map((r, i) => h('div', { class: 'name-rule' },
         h('span', { class: 'name-targets' },
-          draft.vod_enabled || (r.media || 'live') !== 'live'
-            ? h('select', { title: 'Where this rule applies', onchange: (e) => { r.media = e.target.value; changedNames(); } },
-              [['live', 'Live TV'], ['vod', 'Movies & series'], ['all', 'Everywhere']].map(([v, l]) => h('option', { value: v, selected: (r.media || 'live') === v }, l)))
+          draft.vod_enabled || attachedIds().length > 1 || (r.media || 'live') !== 'live' || r.source
+            ? h('select', {
+              title: 'Where this rule applies',
+              onchange: (e) => {
+                const [media, source] = e.target.value.split('|');
+                r.media = media;
+                if (source) r.source = Number(source);
+                else delete r.source;
+                changedNames();
+              },
+            }, nameTargets(r).list.map(([v, l]) => h('option', { value: v, selected: nameTargets(r).value === v }, l)))
             : null,
           h('select', { onchange: (e) => { r.scope = e.target.value; changedNames(); } },
             [['channel', draft.vod_enabled ? 'Names & titles' : 'Channel names'], ['category', 'Category names'], ['both', 'Both']]
@@ -1505,7 +1528,7 @@ async function outputEditor(main, id) {
       h('p', { class: 'hint' },
         'Tidy the names players show, like "US: Daily News ᴴᴰ" into "Daily News". Each rule\'s pattern is a regular expression (case-sensitive) ',
         'and every match is replaced; rules run top to bottom, then leftover spaces are tidied. Names you set by hand are never changed. ',
-        'With movies & series on, each rule also says where it applies: live TV, movies & series, or everywhere.'),
+        'With movies & series on or more than one source, each rule also says where it applies: live TV or movies & series, from every source or just one, or everywhere.'),
       namesBox, namePreview)
     : nameCount
       ? h('p', { class: 'hint quiet-line' },

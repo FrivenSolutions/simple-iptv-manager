@@ -219,6 +219,8 @@ export function checkNameRules(list) {
     const media = r?.media ?? 'live';
     const find = typeof r?.find === 'string' ? r.find : '';
     const replace = typeof r?.replace === 'string' ? r.replace : '';
+    const source = r?.source ?? null;
+    if (source !== null && !Number.isInteger(source)) return { error: 'A name rule\'s source must be a source id' };
     if (!NAME_SCOPES.includes(scope)) return { error: `Unknown name rule scope: ${scope}` };
     if (!NAME_MEDIA.includes(media)) return { error: `Unknown name rule target: ${media}` };
     if (!find) return { error: 'Every name cleanup rule needs something to find' };
@@ -228,7 +230,7 @@ export function checkNameRules(list) {
     } catch (e) {
       return { error: `Not a valid pattern: ${find} (${e.message.split(': ').pop()})` };
     }
-    rules.push({ scope, media, find, replace });
+    rules.push({ scope, media, ...(source === null ? {} : { source }), find, replace });
   }
   return { rules };
 }
@@ -246,9 +248,10 @@ export function nameCleaner(rules, media = 'live') {
   const make = (scope) => {
     const list = compiled.filter((r) => r.scope === scope || r.scope === 'both');
     if (!list.length) return (name) => name;
-    return (name) => {
+    // source: the source the name comes from, for rules aimed at just one.
+    return (name, source) => {
       let out = name;
-      for (const r of list) out = out.replace(r.re, r.replace);
+      for (const r of list) if (!r.source || r.source === source) out = out.replace(r.re, r.replace);
       return out.replace(/\s{2,}/g, ' ').trim() || name;
     };
   };
@@ -343,7 +346,7 @@ export function channelCompare(output, cat, clean, positions) {
   const mode = cat.ch_sort || output.ch_sort || 'provider';
   const names = new Map();
   const shown = (ch) => {
-    if (!names.has(ch.id)) names.set(ch.id, ch.custom_name || clean.channel(ch.name));
+    if (!names.has(ch.id)) names.set(ch.id, ch.custom_name || clean.channel(ch.name, cat.source_id));
     return names.get(ch.id);
   };
   if (mode === 'name') return (a, b) => byName(shown(a), shown(b)) || a.sort - b.sort;
@@ -377,7 +380,7 @@ export function evaluateCategories(db, output, kind = 'live') {
   // (prefix and suffix included) or as arranged by hand.
   const catClean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || [], kind === 'live' ? 'live' : 'vod');
   const affix = categoryAffixer(output);
-  const shownCat = (c) => affix(c.source_id, c.custom_name || catClean.category(c.name));
+  const shownCat = (c) => affix(c.source_id, c.custom_name || catClean.category(c.name, c.source_id));
   const catPositions = output.cat_sort === 'custom' ? positionsOf(db, 'output_category_order', 'category_id', output.id) : null;
   const within = output.cat_sort === 'name' ? (a, b) => byName(shownCat(a), shownCat(b))
     : catPositions ? (a, b) => byPosition(catPositions, a, b) : () => 0;
@@ -420,7 +423,7 @@ export function selectChannels(db, output) {
   const guideIcons = guideIconLookup(db, srcById);
   const clean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || []);
   const affix = categoryAffixer(output);
-  const groupName = new Map(cats.map((c) => [c.id, affix(c.source_id, c.custom_name || clean.category(c.name))]));
+  const groupName = new Map(cats.map((c) => [c.id, affix(c.source_id, c.custom_name || clean.category(c.name, c.source_id))]));
   const ids = output.sources.map((s) => s.id);
   const rows = db.all(
     `SELECT * FROM channels WHERE active = 1 AND source_id IN (${ids.map(() => '?').join(',')})`,
@@ -463,7 +466,7 @@ export function selectChannels(db, output) {
       id: ch.id,
       source_id: ch.source_id,
       category_id: cat.id,
-      name: ch.custom_name || clean.channel(ch.name),
+      name: ch.custom_name || clean.channel(ch.name, ch.source_id),
       // No provider logo: borrow the one the guide lists for this channel.
       logo: ch.custom_logo || ch.logo || (epgId && guideIcons(ch.source_id).get(epgId)) || '',
       group: groupName.get(cat.id),

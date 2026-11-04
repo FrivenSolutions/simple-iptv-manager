@@ -253,6 +253,10 @@ test('nameCleaner tidies only runs of spaces (a double "s" in a name is left alo
   assert.equal(clean.channel('Mississippi'), 'Mississippi');
   assert.equal(nameCleaner([{ scope: 'channel', media: 'vod', find: 'x', replace: '' }]).channel('xx y'), 'xx y', 'VOD rules skip live TV');
   assert.equal(nameCleaner([{ scope: 'channel', media: 'all', find: 'x', replace: '' }], 'vod').channel('xx y'), 'y');
+  const oneSource = nameCleaner([{ scope: 'both', source: 2, find: 'x', replace: '' }]);
+  assert.equal(oneSource.channel('xx y', 2), 'y');
+  assert.equal(oneSource.channel('xx y', 3), 'xx y', 'a rule for one source skips the others');
+  assert.equal(oneSource.category('xx y', 3), 'xx y');
 });
 
 test('parseEpisodeName finds the show, season and episode in playlist names', () => {
