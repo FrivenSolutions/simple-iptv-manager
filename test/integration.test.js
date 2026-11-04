@@ -2328,6 +2328,10 @@ test('extra Xtream Codes logins share an output, and come and go without touchin
   await api('DELETE', `/api/outputs/${other.id}`);
   // Listed with the output, in backups (password only with secrets), not copied by Duplicate.
   assert.deepEqual((await api('GET', `/api/outputs/${outputId}`)).data.xc_logins.map((l) => [l.name, l.username, l.enabled]), [['Mom', 'mom', true]]);
+  // Renaming leaves the login itself alone.
+  await api('PUT', `/api/outputs/${outputId}/logins/${mom.id}`, { name: 'Mum' });
+  assert.deepEqual((await api('GET', `/api/outputs/${outputId}`)).data.xc_logins.map((l) => [l.name, l.username, l.password]), [['Mum', 'mom', 'm0m']]);
+  await api('PUT', `/api/outputs/${outputId}/logins/${mom.id}`, { name: 'Mom' });
   // Listed by name (or username when unnamed), ignoring case.
   const zoe = (await api('POST', `/api/outputs/${outputId}/logins`, { name: 'zoe', username: 'z', password: 'z' })).data;
   const bob = (await api('POST', `/api/outputs/${outputId}/logins`, { name: '', username: 'Bob', password: 'b' })).data;

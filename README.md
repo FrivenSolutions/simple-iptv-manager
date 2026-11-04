@@ -265,8 +265,8 @@ when they are built, from the `.git` folder in the build context. An image built
 
    **Sharing an output.** Under **Connect your apps → Other logins**, **+ Add login** gives
    someone their own username and password for the same output. Each login has its own playlist
-   and guide URLs, and shows when it was last used. You can switch one off, or **Remove** it, and
-   every other login keeps working. The output's token URLs are shared by everyone who has them,
+   and guide URLs, and shows when it was last used. Expand one to change its name. You can switch one off, or
+   **Remove** it, and every other login keeps working. The output's token URLs are shared by everyone who has them,
    so give people a login rather than those.
 
 ### Sorting

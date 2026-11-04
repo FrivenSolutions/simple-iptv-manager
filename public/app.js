@@ -2008,6 +2008,12 @@ async function outputEditor(main, id) {
               },
             }, 'Remove'))),
         openLogins.has(l.id) ? h('div', { class: 'login-body' },
+          field('Name', h('input', {
+            value: l.name || '',
+            placeholder: l.username,
+            onchange: (e) => attempt(() => api('PUT', `/api/outputs/${id}/logins/${l.id}`, { name: e.target.value }), 'Name saved').then(reload),
+            onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); },
+          })),
           h('div', { class: 'two' }, copyField('Username', l.username), copyField('Password', l.password)),
           copyField('M3U playlist', playlistUrl(l)),
           copyField('XMLTV guide', guideUrl(l))) : null)));
