@@ -185,6 +185,7 @@ export class Light {
     this.cmd = cmd;
     this.device = device;
     this.jobs = new Map(); // channel id -> Job
+    this.vodCopies = 0; // movies and episodes being converted for the Watch page (see vodwatch.js)
     this.version = null; // ffmpeg's version once found
     this.autoChoice = null; // what "auto" settled on: 'vaapi' or 'software'
   }

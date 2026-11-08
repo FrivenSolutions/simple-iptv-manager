@@ -499,6 +499,18 @@ Without ffmpeg, or on an iPhone (no Media Source), the page says the channel can
 open in VLC or another player app. It follows the output's stream mode, and anyone with the link
 can play the channel, like the output's playlist link.
 
+**Movies and series.** On an output with movies and series, **Live TV**, **Movies** and **Series**
+tabs sit above the list. Open a category to see its titles, or search across them all. A series
+opens to its seasons and episodes, asked of the provider then, as a player app would. **‹ Prev** /
+**Next ›** step through the titles or episodes in the list.
+
+They play through this server too, with the browser's own seeking. When the browser can't decode
+one (Dolby sound in an MKV, which Chrome plays silently, or an old AVI), ffmpeg makes a copy it
+can: the picture as it is when it's H.264 or H.265, else H.264, with AAC stereo sound. The page
+switches to it by itself, from where it was. A converted copy has its own position bar, and seeking
+starts a new copy from that point. It counts toward the same limit as converted channels.
+**Copy link** gives the title's link on the output's Xtream Codes login, for a player app.
+
 ### Movies and series
 
 Off by default, in two places:

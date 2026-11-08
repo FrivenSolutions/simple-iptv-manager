@@ -18,7 +18,9 @@ import { computeAlerts } from './alerts.js';
 import { KEEP as AUTO_BACKUP_KEEP } from './autobackup.js';
 import { autoLimit } from './streams.js';
 import { now } from './db.js';
-import { serveWatch } from './stream.js';
+import { serveWatch, serveVod } from './stream.js';
+import { vodStreams, seriesList, seriesInfo, vodTarget } from './outputs/xcvod.js';
+import { probeVod, serveVodCopy } from './vodwatch.js';
 import { newSecret, checkCode, otpauthUri, qrSvg, newRecoveryCodes, useRecoveryCode } from './totp.js';
 import { clientIp } from './viewers.js';
 import { Attempts, isPrivateAddress } from './guard.js';
@@ -504,6 +506,73 @@ export function registerApi(router, ctx) {
     // MPEG-2 video or Dolby (AC-3) sound.
     if (query.get('convert') === '1') return serveLight(ctx, res, ch, viewer, { profile: 'browser' });
     return serveWatch(ctx, res, sel.output, ch, ext, viewer);
+  });
+  // Movies and series on the Watch page: categories, then a category's titles (or a search
+  // across them), a series' episodes, and playing one. Names as the output's players see them.
+  const vodOf = (outputId) => {
+    const vod = ctx.vod(Number(outputId));
+    if (!vod) throw new HttpError(404, 'This output has no movies or series');
+    return vod;
+  };
+  router.get('/api/outputs/:id/vod', (req, res, { params, query }) => {
+    const kind = query.get('kind') === 'series' ? 'series' : 'movie';
+    const vc = vodOf(params.id)[kind];
+    const categoryId = Number(query.get('category_id')) || null;
+    const q = String(query.get('q') || '').trim().toLowerCase();
+    if (!categoryId && !q) {
+      const shown = vc.cats.filter((c) => c.included && c.channel_count - (c.excluded_count || 0) > 0);
+      return sendJson(res, 200, {
+        categories: shown.map((c) => ({
+          id: c.id,
+          name: vc.affix(c.source_id, c.custom_name || vc.clean.category(c.name, c.source_id)),
+          count: c.channel_count - (c.excluded_count || 0),
+        })),
+      });
+    }
+    const all = kind === 'movie'
+      ? vodStreams(db, vc, categoryId).map((s) => ({ id: s.stream_id, name: s.name, poster: s.stream_icon, ext: s.container_extension, category_id: Number(s.category_id) }))
+      : seriesList(db, vc, categoryId).map((s) => ({ id: s.series_id, name: s.name, poster: s.cover, category_id: Number(s.category_id) }));
+    const items = q ? all.filter((x) => x.name.toLowerCase().includes(q)) : all;
+    const LIMIT = q ? 300 : 5000;
+    sendJson(res, 200, { items: items.slice(0, LIMIT), total: items.length });
+  });
+  router.get('/api/outputs/:id/series/:sid', async (req, res, { params }) => {
+    const r = await seriesInfo(db, vodOf(params.id).series, params.sid);
+    if (!r.episodes) throw new HttpError(404, 'Series is not in this output');
+    sendJson(res, 200, {
+      seasons: Object.entries(r.episodes).map(([n, eps]) => ({
+        season: Number(n),
+        episodes: eps.map((e) => ({ id: Number(e.id), num: e.episode_num, title: e.title, ext: e.container_extension })),
+      })),
+    });
+  });
+  const vodWatchTarget = (params) => {
+    if (!['movie', 'episode'].includes(params.kind)) throw new HttpError(404, 'Not found');
+    const target = vodTarget(db, vodOf(params.id), params.kind === 'movie' ? 'movie' : 'series', params.vid);
+    if (!target) throw new HttpError(404, `${params.kind === 'movie' ? 'Movie' : 'Episode'} is not in this output`);
+    return target;
+  };
+  router.get('/api/outputs/:id/watch-vod/:kind/:vid/probe', async (req, res, { params }) => {
+    const r = await probeVod(ctx, vodWatchTarget(params));
+    if (!r.ffmpeg) throw new HttpError(503, 'Converting needs ffmpeg, which is not installed on this server.');
+    if (r.busy) throw new HttpError(503, `All ${r.busy} stream${r.busy === 1 ? '' : 's'} for this source are in use.`);
+    sendJson(res, 200, { duration: r.duration, video: r.video, audio: r.audio });
+  });
+  router.get('/api/outputs/:id/watch-vod/:kind/:vid', (req, res, { params, query }) => {
+    const target = vodWatchTarget(params);
+    const output = mustGet(db, 'outputs', params.id);
+    const viewer = {
+      outputId: output.id, output: output.name, who: 'Web player', username: null, ip: clientIp(req),
+      what: target.title, kind: params.kind, source: target.src.name, sourceId: target.src.id,
+    };
+    // ?convert=1: a copy the browser can decode, from ?t= seconds in (2: the picture re-encoded too).
+    if (['1', '2'].includes(query.get('convert'))) {
+      return serveVodCopy(ctx, res, target, {
+        t: Math.max(0, Math.floor(Number(query.get('t')) || 0)), vcodec: query.get('vcodec'), encode: query.get('convert') === '2', viewer,
+      });
+    }
+    // Always relayed, whatever the output's mode: the browser can't play the provider's URL itself.
+    return serveVod(ctx, req, res, { ...output, stream_mode: 'proxy' }, target, viewer);
   });
   router.post('/api/alerts/test', async (req, res) => {
     const { type, url } = ctx.alerts.target;

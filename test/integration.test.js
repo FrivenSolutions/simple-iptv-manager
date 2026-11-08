@@ -2220,6 +2220,51 @@ test('movies and series: loaded when a source includes them, filtered per output
   assert.equal((await get(`/movie/vod/pw/${amelie}.mp4`)).status, 404, 'a movie outside the output is refused');
   assert.equal((await get(`/movie/vod/wrong/${dieHard.stream_id}.mkv`)).status, 401);
 
+  // The Watch page: categories, a category's titles, a search, a series' episodes, and playing one,
+  // always through this server (the output here is on Redirect).
+  const watchList = (qs) => api('GET', `/api/outputs/${o.id}/vod?${qs}`).then((x) => x.data);
+  const movieCatList = (await watchList('kind=movie')).categories;
+  assert.deepEqual(movieCatList.map((c) => [c.name, c.count]), [['EN| ACTION', 2], ['EN| KIDS', 1]]);
+  assert.deepEqual((await watchList(`kind=movie&category_id=${movieCatList[0].id}`)).items.map((x) => [x.name, x.ext]), [['Tower Siege', 'mkv'], ['City Chase', 'mp4']]);
+  assert.deepEqual((await watchList('kind=movie&q=snow')).items.map((x) => x.name), ['Snow Day']);
+  assert.deepEqual((await watchList('kind=series&q=chem')).items.map((x) => x.id), [shows[0].series_id]);
+  const eps = (await api('GET', `/api/outputs/${o.id}/series/${shows[0].series_id}`)).data.seasons;
+  assert.deepEqual(eps.map((x) => [x.season, x.episodes.map((e) => e.title)]), [[1, ['Pilot', 'Cat in the Bag']]]);
+  assert.equal(eps[0].episodes[0].id, Number(pilot.id));
+  const watchGet = (p, headers = {}) => fetch(`${base}/api/outputs/${o.id}/watch-vod/${p}`, { headers: { cookie, ...headers } });
+  r = await watchGet(`movie/${dieHard.stream_id}`, { range: 'bytes=0-9' });
+  assert.equal(r.status, 206);
+  assert.equal(await r.text(), 'MOVIE-5001');
+  r = await watchGet(`episode/${pilot.id}`);
+  assert.match(await r.text(), /^SERIES-90001-/);
+  assert.equal((await watchGet(`movie/${amelie}`)).status, 404);
+  assert.equal((await fetch(`${base}/api/outputs/${o.id}/watch-vod/movie/${dieHard.stream_id}`)).status, 401, 'signed in only');
+  // A copy the browser can decode, from a point in: the picture kept when it's H.264, else re-encoded.
+  {
+    const light = app.ctx.light;
+    const realCmd = light.cmd;
+    const log = path.join(os.tmpdir(), `iptvm-vodcopy-${process.pid}.log`);
+    process.env.FAKE_FFMPEG_LOG = log;
+    light.cmd = [process.execPath, fileURLToPath(new URL('./fake-ffmpeg.mjs', import.meta.url))];
+    try {
+      r = await watchGet(`movie/${dieHard.stream_id}?convert=1&t=90&vcodec=h264`);
+      assert.equal(r.headers.get('content-type'), 'video/mp4');
+      assert.equal(await r.text(), 'LIGHT[copy];');
+      r = await watchGet(`movie/${dieHard.stream_id}?convert=1&vcodec=mpeg4`);
+      assert.equal(await r.text(), 'LIGHT[libx264];');
+      assert.equal((await watchGet(`movie/${dieHard.stream_id}/probe`)).status, 200);
+      const runs = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((a) => a.includes('-i'));
+      assert.equal(runs[0][runs[0].indexOf('-ss') + 1], '90');
+      assert.match(runs[0][runs[0].indexOf('-i') + 1], /\/movie\/xu\/xp\/5001\.mkv$/);
+      assert.equal(runs[1].includes('-ss'), false);
+      assert.equal(light.vodCopies, 0, 'each copy is let go when its request ends');
+    } finally {
+      light.cmd = realCmd;
+      delete process.env.FAKE_FFMPEG_LOG;
+      fs.rmSync(log, { force: true });
+    }
+  }
+
   // Proxy relays it, seeking included.
   await api('PUT', `/api/outputs/${o.id}`, { stream_mode: 'proxy' });
   r = await get(`/movie/vod/pw/${dieHard.stream_id}.mkv`, { range: 'bytes=0-9' });

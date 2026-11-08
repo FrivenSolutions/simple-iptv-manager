@@ -286,6 +286,13 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; backgr
 .ch-option .check.sub { margin: 4px 0 0 22px; font-size: 13px; }
 .ch-option .hint.sub { margin-left: 44px; }
 .warn-text { color: var(--warn); }
+.watch-search { display: flex; flex-direction: column; gap: 8px; }
+.watch-tabs { align-self: flex-start; }
+.watch-cat { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; font-family: inherit; }
+.watch-episodes { padding-left: 12px; }
+.watch-seek { display: flex; align-items: center; gap: 10px; padding: 6px 2px 0; }
+.watch-seek input { flex: 1; min-width: 0; }
+.watch-seek[hidden] { display: none; }
 .sort-bar { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-bottom: 12px; }
 .sort-bar .hint { margin: 0; }
 .sort-pick { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }

@@ -2396,6 +2396,35 @@ async function watchView(main, outputId, channelId) {
   const nowLine = h('div', { class: 'watch-now' }, h('span', { class: 'meta' }, 'Pick a channel to start watching.'));
   const message = h('div', { class: 'watch-message', hidden: true });
   const list = h('div', { class: 'watch-list-body' });
+  // Movies and series (outputs that have them): what the list shows, and what's been loaded.
+  let mode = 'live';
+  try {
+    mode = localStorage.getItem('iptvm.watchMode') || 'live';
+  } catch {}
+  let vod = null; // { movie: { cats, open: Set, items: Map }, series: {...}, episodes: Map, openSeries: Set }
+  let found = null; // search results across a kind: { q, items, total }
+  // A converted title plays from offset seconds in; seeking asks for a new copy from there.
+  const seekRange = h('input', { type: 'range', min: 0, step: 1, value: 0 });
+  const seekTime = h('span', { class: 'meta' });
+  const seekBox = h('div', { class: 'watch-seek', hidden: true }, seekRange, seekTime);
+  let offset = 0;
+  const clock = (s) => {
+    s = Math.max(0, Math.floor(s || 0));
+    const hh = Math.floor(s / 3600);
+    const mm = String(Math.floor((s % 3600) / 60)).padStart(hh ? 2 : 1, '0');
+    return `${hh ? `${hh}:` : ''}${mm}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const showClock = (at) => { seekTime.textContent = `${clock(at)} / ${clock(Number(seekRange.max))}`; };
+  video.addEventListener('timeupdate', () => {
+    if (seekBox.hidden || document.activeElement === seekRange) return;
+    seekRange.value = String(Math.floor(offset + video.currentTime));
+    showClock(offset + video.currentTime);
+  });
+  seekRange.addEventListener('input', () => showClock(Number(seekRange.value)));
+  seekRange.addEventListener('change', () => {
+    seekRange.blur();
+    if (current?.vod) playVod(current, { convert: true, encode: current.encoded, t: Number(seekRange.value) });
+  });
 
   const showMessage = (text, kind = 'error') => {
     message.className = `watch-message ${kind}`;
@@ -2413,7 +2442,7 @@ async function watchView(main, outputId, channelId) {
   let lastRetry = 0;
   let retryNote = false;
   const reconnect = (why) => {
-    if (!current || !wantPlaying || Date.now() - lastRetry < 5000) return;
+    if (!current || current.vod || !wantPlaying || Date.now() - lastRetry < 5000) return;
     if (retries >= 10) {
       wantPlaying = false;
       return showMessage([h('b', null, 'The stream keeps dropping. '), `Last time ${why}. Try again later, or another channel.`]);
@@ -2426,7 +2455,7 @@ async function watchView(main, outputId, channelId) {
   video.addEventListener('pause', () => { if (Date.now() > ownPauseUntil && !video.ended) wantPlaying = false; });
   video.addEventListener('ended', () => reconnect('the stream ended'));
   const watchdog = setInterval(() => {
-    if (!current || !wantPlaying) return;
+    if (!current || current.vod || !wantPlaying) return;
     const now = Date.now();
     if (video.currentTime !== lastTime) {
       lastTime = video.currentTime;
@@ -2459,6 +2488,8 @@ async function watchView(main, outputId, channelId) {
       } catch {}
       player = null;
     }
+    video.onerror = null;
+    seekBox.hidden = true;
     video.pause();
     video.removeAttribute('src');
     video.load();
@@ -2497,6 +2528,7 @@ async function watchView(main, outputId, channelId) {
 
   // retry: why this is a reconnect (keeps a small note up until the picture moves again).
   const play = async (ch, retry = null) => {
+    if (ch.vod) return playVod(ch);
     stop();
     if (!retry || current !== ch) retries = 0;
     current = ch;
@@ -2575,7 +2607,69 @@ async function watchView(main, outputId, channelId) {
     }
   };
 
+  // A movie or episode: played as it is, through this server, where the browser can decode it. If it
+  // can't (an error, or Chrome playing the picture without the sound), a converted copy instead.
+  const playVod = async (item, { convert = false, encode = false, t = 0 } = {}) => {
+    stop();
+    current = item;
+    item.encoded = encode;
+    wantPlaying = false;
+    fill(nowLine, h('b', null, item.title));
+    drawList();
+    const base = `/api/outputs/${oid}/watch-vod/${item.kind}/${item.id}`;
+    const convertFrom = (at, why) => {
+      if (current !== item) return;
+      if (convert && encode) return failed(base, 'media', why);
+      playVod(item, { convert: true, encode: convert, t: Math.floor(at) });
+    };
+    if (!convert) {
+      showMessage(null);
+      video.src = base;
+      video.onerror = () => {
+        const code = video.error?.code;
+        if (code === 1) return;
+        if (code === 3 || code === 4) return convertFrom(video.currentTime, `MediaError ${code}`);
+        failed(base, code === 2 ? 'network' : 'other', [`MediaError ${code}`, video.error?.message].filter(Boolean).join(': '));
+      };
+      // Chrome plays a picture whose sound it can't decode, silently: worth a converted copy.
+      video.addEventListener('playing', () => setTimeout(() => {
+        if (current === item && !item.encoded && video.webkitAudioDecodedByteCount === 0 && video.currentTime > 2 && !video.paused) {
+          convertFrom(video.currentTime, 'no sound');
+        }
+      }, 4000), { once: true });
+    } else {
+      showMessage('Converting on the server: the browser can\'t decode this title as it is. Seeking starts a new copy from that point…', 'warn');
+      try {
+        item.probe ||= await api('GET', `${base}/probe`);
+      } catch (e) {
+        if (current === item) showMessage([h('b', null, e.message), ' Use Copy link and a player app such as VLC.']);
+        return;
+      }
+      if (current !== item) return;
+      offset = t;
+      seekRange.max = String(item.probe.duration || 0);
+      seekRange.value = String(t);
+      showClock(t);
+      seekBox.hidden = !item.probe.duration;
+      video.src = `${base}?convert=${encode ? 2 : 1}&t=${t}&vcodec=${encodeURIComponent(item.probe.video || '')}`;
+      video.onerror = () => {
+        const code = video.error?.code;
+        if (code === 1) return;
+        if ((code === 3 || code === 4) && !encode) return convertFrom(offset + video.currentTime, `MediaError ${code}`);
+        failed(video.src, code === 3 || code === 4 ? 'media' : code === 2 ? 'network' : 'other', `MediaError ${code}`);
+      };
+      video.addEventListener('playing', () => { if (current === item) showMessage(null); }, { once: true });
+    }
+    await video.play().catch(() => {});
+  };
+
   const step = (d) => {
+    if (current?.vod) {
+      const sibs = current.siblings || [];
+      const i = sibs.findIndex((x) => x.id === current.id);
+      if (i >= 0 && sibs.length > 1) playVod(sibs[(i + d + sibs.length) % sibs.length]);
+      return;
+    }
     const shown = filtered();
     if (!shown.length) return;
     const i = current ? shown.findIndex((c) => c.id === current.id) : -1;
@@ -2592,7 +2686,113 @@ async function watchView(main, outputId, channelId) {
     const t = q.trim().toLowerCase();
     return lineup.channels.filter((c) => !t || c.name.toLowerCase().includes(t) || (c.group || '').toLowerCase().includes(t) || (c.now || '').toLowerCase().includes(t));
   };
+  const isOn = (x) => current && !!current.vod === !!x.vod && current.kind === x.kind && current.id === x.id;
+  const vodRow = (item, sibs, extra = null) => h('button', { class: `watch-ch ${isOn(item) ? 'on' : ''}`, onclick: () => { item.siblings = sibs; playVod(item); } },
+    item.poster ? h('img', { src: item.poster, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : h('span', { class: 'watch-logo' }),
+    h('span', { class: 'watch-ch-text' }, h('span', { class: 'watch-ch-name' }, item.label || item.title), extra));
+  const loadItems = async (cid) => {
+    const k = vod[mode];
+    if (k.items.has(cid)) return;
+    k.items.set(cid, null);
+    const r = await api('GET', `/api/outputs/${oid}/vod?kind=${mode}&category_id=${cid}`);
+    k.items.set(cid, r.items);
+    drawList();
+  };
+  const asItem = (x) => (mode === 'movie' ? { vod: true, kind: 'movie', id: x.id, title: x.name, poster: x.poster, ext: x.ext } : x);
+  // A series: its seasons and episodes, loaded from the provider when opened.
+  const seriesRows = (s) => {
+    const open = vod.openSeries.has(s.id);
+    const head = h('button', {
+      class: 'watch-ch',
+      onclick: async () => {
+        if (open) vod.openSeries.delete(s.id);
+        else vod.openSeries.add(s.id);
+        drawList();
+        if (!open && !vod.episodes.has(s.id)) {
+          vod.episodes.set(s.id, null);
+          try {
+            vod.episodes.set(s.id, (await api('GET', `/api/outputs/${oid}/series/${s.id}`)).seasons);
+          } catch (e) {
+            vod.episodes.delete(s.id);
+            toast(e.message, 'error');
+          }
+          drawList();
+        }
+      },
+    }, s.poster ? h('img', { src: s.poster, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : h('span', { class: 'watch-logo' }),
+    h('span', { class: 'watch-ch-text' }, h('span', { class: 'watch-ch-name' }, `${open ? '▾' : '▸'} ${s.name}`)));
+    if (!open) return [head];
+    const seasons = vod.episodes.get(s.id);
+    if (!seasons) return [head, h('p', { class: 'meta pad' }, 'Loading episodes…')];
+    const eps = seasons.flatMap((se) => se.episodes.map((e) => ({
+      vod: true, kind: 'episode', id: e.id, ext: e.ext, season: se.season,
+      label: `E${e.num || '?'}${e.title && e.title !== s.name ? ` · ${e.title}` : ''}`,
+      title: `${s.name} · S${se.season} E${e.num || '?'}${e.title && !e.title.includes(s.name) ? ` ${e.title}` : ''}`,
+    })));
+    return [head, h('div', { class: 'watch-episodes' },
+      seasons.length ? null : h('p', { class: 'meta pad' }, 'No episodes listed.'),
+      seasons.map((se) => [h('div', { class: 'watch-group' }, `Season ${se.season}`),
+        eps.filter((e) => e.season === se.season).map((e) => vodRow(e, eps))]))];
+  };
+  const drawVod = () => {
+    if (!vod?.[mode].cats) return fill(list, h('p', { class: 'meta pad' }, 'Loading…'));
+    const k = vod[mode];
+    const rowsOf = (items) => {
+      const shown = items.map(asItem);
+      return mode === 'movie' ? shown.map((x) => vodRow(x, shown)) : items.flatMap(seriesRows);
+    };
+    if (found) {
+      return fill(list,
+        found.items ? rowsOf(found.items) : h('p', { class: 'meta pad' }, 'Searching…'),
+        found.items && !found.items.length ? h('p', { class: 'meta pad' }, 'Nothing matches.') : null,
+        found.total > (found.items?.length || 0) ? h('p', { class: 'meta pad' }, `Showing ${found.items.length} of ${found.total}. Type more to narrow it down.`) : null);
+    }
+    fill(list,
+      k.cats.map((c) => {
+        const open = k.open.has(c.id);
+        const items = k.items.get(c.id);
+        return [
+          h('button', {
+            class: 'watch-group watch-cat',
+            onclick: () => {
+              if (open) k.open.delete(c.id);
+              else k.open.add(c.id);
+              drawList();
+              if (!open) loadItems(c.id);
+            },
+          }, `${open ? '▾' : '▸'} ${c.name}`, h('span', { class: 'meta' }, ` · ${c.count}`)),
+          open ? (items ? rowsOf(items) : h('p', { class: 'meta pad' }, 'Loading…')) : null,
+        ];
+      }),
+      k.cats.length ? null : h('p', { class: 'meta pad' }, `This output has no ${mode === 'movie' ? 'movies' : 'series'}.`));
+  };
+  const loadVod = async () => {
+    vod ||= { movie: { open: new Set(), items: new Map() }, series: { open: new Set(), items: new Map() }, episodes: new Map(), openSeries: new Set() };
+    if (!vod[mode].cats) {
+      drawList();
+      vod[mode].cats = (await api('GET', `/api/outputs/${oid}/vod?kind=${mode}`)).categories;
+    }
+    drawList();
+  };
+  let searchTimer = null;
+  const searchVod = () => {
+    clearTimeout(searchTimer);
+    const term = q.trim();
+    found = term.length >= 2 ? { q: term, items: null } : null;
+    drawList();
+    if (!found) return;
+    const kind = mode;
+    searchTimer = setTimeout(async () => {
+      const r = await api('GET', `/api/outputs/${oid}/vod?kind=${kind}&q=${encodeURIComponent(term)}`);
+      if (found?.q === term && mode === kind) {
+        found = { q: term, items: r.items, total: r.total };
+        drawList();
+      }
+    }, 300);
+  };
+
   const drawList = () => {
+    if (mode !== 'live') return drawVod();
     const rows = filtered();
     const out = [];
     let group = null;
@@ -2601,7 +2801,7 @@ async function watchView(main, outputId, channelId) {
         group = c.group;
         out.push(h('div', { class: 'watch-group' }, group || 'Other'));
       }
-      out.push(h('button', { class: `watch-ch ${current?.id === c.id ? 'on' : ''}`, onclick: () => play(c) },
+      out.push(h('button', { class: `watch-ch ${current && !current.vod && current.id === c.id ? 'on' : ''}`, onclick: () => play(c) },
         c.logo ? h('img', { src: c.logo, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : h('span', { class: 'watch-logo' }),
         h('span', { class: 'watch-ch-text' },
           h('span', { class: 'watch-ch-name' }, c.chno ? h('span', { class: 'meta' }, `${c.chno} `) : null, c.name),
@@ -2618,15 +2818,51 @@ async function watchView(main, outputId, channelId) {
     try {
       localStorage.setItem('iptvm.watchOutput', String(oid));
     } catch {}
+    vod = null;
+    found = null;
     lineup = await api('GET', `/api/outputs/${oid}/lineup`);
     if (window.MediaSource) for (const c of lineup.channels) if (c.codecs?.convert) convertIds.add(c.id);
-    drawList();
+    if (!outputs.find((x) => x.id === oid)?.vod_enabled) mode = 'live';
+    drawTabs();
+    if (mode === 'live') drawList();
+    else await loadVod();
     if (lineup.paused) showMessage('This output is paused; resume it under Manage output to watch.', 'warn');
   };
 
   const select = h('select', { class: 'watch-output', title: 'Output', onchange: async (e) => { oid = Number(e.target.value); try { history.replaceState(null, '', `#/watch/${oid}`); } catch {} await loadOutput(); } },
     outputs.map((o) => h('option', { value: o.id, selected: o.id === oid }, o.name)));
-  const search = h('input', { type: 'search', placeholder: 'Search channels or what\'s on', oninput: (e) => { q = e.target.value; drawList(); } });
+  const placeholders = { live: 'Search channels or what\'s on', movie: 'Search movies', series: 'Search series' };
+  const search = h('input', { type: 'search', placeholder: placeholders[mode] || placeholders.live, oninput: (e) => { q = e.target.value; if (mode === 'live') drawList(); else searchVod(); } });
+  // Live TV, Movies, Series: shown when the output has movies and series.
+  const tabs = h('div', { class: 'segmented small watch-tabs' });
+  const drawTabs = () => {
+    tabs.hidden = !outputs.find((x) => x.id === oid)?.vod_enabled;
+    fill(tabs, [['live', 'Live TV'], ['movie', 'Movies'], ['series', 'Series']].map(([m, label]) => h('button', {
+      class: mode === m ? 'on' : '',
+      onclick: async () => {
+        if (mode === m) return;
+        mode = m;
+        try {
+          localStorage.setItem('iptvm.watchMode', m);
+        } catch {}
+        q = '';
+        search.value = '';
+        search.placeholder = placeholders[m];
+        found = null;
+        drawTabs();
+        if (m === 'live') drawList();
+        else await loadVod();
+      },
+    }, label)));
+  };
+  // A player app's link: the output's Xtream Codes login for movies and episodes.
+  const copyLink = () => {
+    if (!current) return toast('Pick something first');
+    if (!current.vod) return copy(`${lineup.stream_base}${current.id}.ts`);
+    const o = outputs.find((x) => x.id === oid);
+    if (!o?.xc_enabled || !o.xc_username) return toast('Movies and series play in apps through the output\'s Xtream Codes login, which is off', 'error');
+    copy(`${o.urls.xc_server}/${current.kind === 'movie' ? 'movie' : 'series'}/${encodeURIComponent(o.xc_username)}/${encodeURIComponent(o.xc_password)}/${current.id}.${current.ext || 'mp4'}`);
+  };
 
   await loadOutput();
   // Wide screens: the page takes the whole window, the player all the height (see .watch-page).
@@ -2636,21 +2872,22 @@ async function watchView(main, outputId, channelId) {
     h('div', { class: 'watch' },
       h('section', { class: 'card watch-player' },
         stage,
+        seekBox,
         h('div', { class: 'watch-bar' },
           nowLine,
           h('span', { class: 'row' },
-            h('button', { class: 'btn small', title: 'Previous channel', onclick: () => step(-1) }, '‹ Prev'),
-            h('button', { class: 'btn small', title: 'Next channel', onclick: () => step(1) }, 'Next ›'),
+            h('button', { class: 'btn small', title: 'Previous (channel, or title in the list)', onclick: () => step(-1) }, '‹ Prev'),
+            h('button', { class: 'btn small', title: 'Next (channel, or title in the list)', onclick: () => step(1) }, 'Next ›'),
             h('button', { class: 'btn small', title: 'Full screen (or double-click the picture)', onclick: fullscreen }, 'Full screen'),
             h('button', {
               class: 'btn small',
-              title: 'Copy this channel\'s stream link, to play it in VLC or another player app',
-              onclick: () => (current ? copy(`${lineup.stream_base}${current.id}.ts`) : toast('Pick a channel first')),
+              title: 'Copy the stream link, to play it in VLC or another player app',
+              onclick: copyLink,
             }, 'Copy link'),
             h('button', { class: 'btn small', onclick: () => { wantPlaying = false; stop(); current = null; drawList(); fill(nowLine, h('span', { class: 'meta' }, 'Stopped.')); } }, 'Stop'))),
         message),
-      h('section', { class: 'card flush watch-channels' }, h('div', { class: 'pad' }, search), list)));
-  const start = channelId && lineup.channels.find((c) => c.id === channelId);
+      h('section', { class: 'card flush watch-channels' }, h('div', { class: 'pad watch-search' }, tabs, search), list)));
+  const start = mode === 'live' && channelId && lineup.channels.find((c) => c.id === channelId);
   if (start) play(start);
 }
 
