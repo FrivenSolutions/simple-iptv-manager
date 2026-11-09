@@ -391,6 +391,8 @@ function bind(params) {
 export function openDb(file) {
   const raw = new DatabaseSync(file);
   raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
+  // The write-ahead log otherwise stays at its biggest size on disk: back to 64 MB once caught up.
+  raw.exec('PRAGMA journal_size_limit = 67108864;');
 
   const cache = new Map();
   const prep = (sql) => {

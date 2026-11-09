@@ -7,7 +7,7 @@ import { parseXmltv, parseXmltvTime } from './xmltv.js';
 import { matchChannels } from './epgmatch.js';
 import { loadHdhrLineup, buildHdhrGuide } from './hdhomerun.js';
 import { now } from './db.js';
-import { loadXcVod, m3uVod, applyVod, clearVod } from './vod.js';
+import { loadXcVod, m3uVod, applyVod, clearVod, yieldToLoop } from './vod.js';
 
 const PROGRAMME_PAST_S = 6 * 3600;
 const PROGRAMME_FUTURE_S = 14 * 86400;
@@ -311,9 +311,14 @@ async function loadEpg(ctx, src, epgUrls, tmps, localFiles = [], warnings = []) 
   db.tx(() => {
     for (const [id, m] of matches) db.run('UPDATE channels SET epg_id = ?, epg_match = ? WHERE id = ?', [m.epgId, m.how, id]);
     db.run('UPDATE sources SET epg_gen = ? WHERE id = ?', [gen, src.id]);
-    db.run('DELETE FROM programmes WHERE source_id = ? AND gen <> ?', [src.id, gen]);
     db.run('DELETE FROM epg_channels WHERE source_id = ? AND gen <> ?', [src.id, gen]);
   });
+  // The old guide goes in slices: one delete of a million listings would hold them all in the
+  // write-ahead log at once, needing about as much free disk again as the guide itself.
+  while (db.run(
+    'DELETE FROM programmes WHERE rowid IN (SELECT rowid FROM programmes WHERE source_id = ? AND gen <> ? LIMIT ?)',
+    [src.id, gen, BATCH * 10],
+  ).changes) await yieldToLoop();
 
   let matched = 0;
   for (const m of matches.values()) if (m.epgId && epgChans.has(m.epgId)) matched++;
@@ -375,6 +380,7 @@ export async function refreshSource(ctx, id, { forceVod = false } = {}) {
     ctx.bump();
 
     let epg;
+    const guideTmps = tmps.length;
     try {
       const localFiles = [];
       const warnings = [];
@@ -398,6 +404,8 @@ export async function refreshSource(ctx, id, { forceVod = false } = {}) {
     } catch (e) {
       epg = { error: `EPG failed: ${e.message}` };
     }
+    // Downloaded guides can be hundreds of MB: gone before movies and series are stored.
+    for (const f of tmps.splice(guideTmps)) fs.rmSync(f, { force: true });
     let vod = null;
     let vodError = null;
     try {

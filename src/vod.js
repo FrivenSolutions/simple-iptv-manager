@@ -5,7 +5,7 @@ import { jsonObjects } from './jsonstream.js';
 import { now } from './db.js';
 
 const CHUNK = 2000;
-const yieldToLoop = () => new Promise((r) => setImmediate(r));
+export const yieldToLoop = () => new Promise((r) => setImmediate(r));
 
 /** "Show Name S01 E02", "Show.Name.S01E02", "Show - S1E2 - Title" -> { show, season, episode }. */
 export function parseEpisodeName(name) {
