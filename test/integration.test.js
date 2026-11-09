@@ -1123,6 +1123,38 @@ test('guide logos fill in missing channel logos, only when the advanced setting 
   await api('DELETE', `/api/outputs/${o.id}`);
 });
 
+test('a source keeps only the guide days its outputs publish, and fetches more when they go up', async () => {
+  const added = eventGuide.push({ id: 'logo1', title: 'In 5 days', fromH: 5 * 24, toH: 5 * 24 + 1 }, { id: 'logo1', title: 'In 12 days', fromH: 12 * 24, toH: 12 * 24 + 1 });
+  const kept = () => app.ctx.db.all(
+    `SELECT p.xml FROM programmes p JOIN sources s ON s.id = p.source_id AND s.epg_gen = p.gen
+     WHERE p.source_id = ? AND p.channel = 'logo1'`, [xcId],
+  ).map((r) => /<title>(.*?)</.exec(r.xml)[1]).filter((t) => t.startsWith('In '));
+  const others = app.ctx.db.get('SELECT MAX(o.epg_days) AS d FROM outputs o JOIN output_sources os ON os.output_id = o.id WHERE os.source_id = ?', [xcId])?.d || 7;
+  assert.ok(others < 11, 'no other output publishes 12 days');
+  await api('POST', `/api/sources/${xcId}/refresh`);
+  await app.ctx.jobs.idle();
+  assert.deepEqual(kept(), ['In 5 days'], 'kept: the longest output guide plus a day');
+
+  // An output asking for 14 days: its source refreshes on its own and keeps them.
+  const o = (await api('POST', '/api/outputs', { name: 'Long guide' })).data;
+  await api('PUT', `/api/outputs/${o.id}`, { source_ids: [xcId], include_all: true, epg_days: 14 });
+  await app.ctx.jobs.idle();
+  assert.deepEqual(kept(), ['In 5 days', 'In 12 days']);
+  const xml = await (await fetch(`${base}/o/${o.token}/epg.xml`)).text();
+  assert.match(xml, /In 12 days/);
+
+  // Back down: the next refresh lets the extra days go, without a refresh of its own.
+  const jobs = app.ctx.db.get('SELECT last_refresh_at FROM sources WHERE id = ?', [xcId]).last_refresh_at;
+  await api('PUT', `/api/outputs/${o.id}`, { epg_days: 3 });
+  await app.ctx.jobs.idle();
+  assert.equal(app.ctx.db.get('SELECT last_refresh_at FROM sources WHERE id = ?', [xcId]).last_refresh_at, jobs);
+  await api('DELETE', `/api/outputs/${o.id}`);
+  await api('POST', `/api/sources/${xcId}/refresh`);
+  await app.ctx.jobs.idle();
+  assert.deepEqual(kept(), ['In 5 days']);
+  eventGuide.splice(added - 2, 2);
+});
+
 test('name cleanup: per-output find/replace on channel and category names, in every format', async () => {
   const o = (await api('POST', '/api/outputs', { name: 'Tidy' })).data;
   await api('PUT', `/api/outputs/${o.id}`, {

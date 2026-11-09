@@ -27,6 +27,10 @@ embedded SQLite database and a few small dependencies.
 
   Channels are matched to the guide by `tvg-id`, then by a normalized name (country prefixes and
   HD/FHD/4K tags are ignored). You can override the match per channel.
+
+  A source keeps only as many days of guide as the outputs using it publish (each output's
+  **Guide days**, 7 by default), plus one. A big guide takes a lot of disk, so fewer days saves
+  space. Raising an output's **Guide days** refreshes its sources to fetch the extra days.
 - **Filtering per output**
   - Category rules: *contains*, *does not contain*, *starts with*, *does not start with*,
     *ends with*, *does not end with*, *equals*, *does not equal* and *regex*.

@@ -10,7 +10,6 @@ import { now } from './db.js';
 import { loadXcVod, m3uVod, applyVod, clearVod, yieldToLoop } from './vod.js';
 
 const PROGRAMME_PAST_S = 6 * 3600;
-const PROGRAMME_FUTURE_S = 14 * 86400;
 const BATCH = 2000;
 
 export function splitUrls(s) {
@@ -184,6 +183,19 @@ function applyPlaylist(db, src, items, categories) {
   return { categories: cats.length, newCategories: added };
 }
 
+/**
+ * Days of guide to keep for a source: the most any output using it publishes (Guide days), plus a
+ * day so the output's window, which moves on with the clock, stays covered until the next refresh.
+ * A source no output uses yet keeps the default of 7.
+ */
+export function guideDaysKept(db, sourceId) {
+  const r = db.get(
+    'SELECT MAX(o.epg_days) AS d FROM outputs o JOIN output_sources os ON os.output_id = o.id WHERE os.source_id = ?',
+    [sourceId],
+  );
+  return (r?.d || 7) + 1;
+}
+
 /** Re-run EPG association for a source against the EPG channels already stored. */
 export function rematchSource(db, sourceId) {
   const src = db.get('SELECT id, epg_gen FROM sources WHERE id = ?', [sourceId]);
@@ -254,7 +266,7 @@ async function loadEpg(ctx, src, epgUrls, tmps, localFiles = [], warnings = []) 
   // Pass 2: programs for matched channels only, inside a rolling time window.
   const t = now();
   const minTs = t - PROGRAMME_PAST_S;
-  const maxTs = t + PROGRAMME_FUTURE_S;
+  const maxTs = t + guideDaysKept(db, src.id) * 86400;
   const ownerFile = new Map(); // first file to supply a channel's programs wins
   let count = 0;
   let batch = [];

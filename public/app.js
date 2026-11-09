@@ -1346,7 +1346,7 @@ async function outputEditor(main, id) {
       field('Stream delivery', mode, null), modeHint,
       h('div', { class: 'two' },
         field('Renumber channels from', inp('number_start', { type: 'number', min: 0, placeholder: 'Keep provider numbers' })),
-        field('Guide days', inp('epg_days', { type: 'number', min: 1, max: 14 }))),
+        field('Guide days', inp('epg_days', { type: 'number', min: 1, max: 14 }), 'More days use more disk space.')),
       h('label', { class: 'check' }, xcToggle, ' Also publish as an Xtream Codes login'),
       xcBox,
       h('label', { class: 'check' },

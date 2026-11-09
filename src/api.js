@@ -11,7 +11,7 @@ import {
   DEFAULT_GUIDE_PATTERNS, guidePatterns, guideHider, guideIdsOf, hiddenReason,
   checkNameRules, parseNameRules, nameCleaner, nowTitles, affixText,
 } from './filters.js';
-import { rematchSource } from './ingest.js';
+import { rematchSource, guideDaysKept } from './ingest.js';
 import { JELLYFIN_CATEGORIES, parseJellyfin } from './outputs/epg.js';
 import { exportSettings, importSettings } from './backup.js';
 import { computeAlerts } from './alerts.js';
@@ -969,6 +969,13 @@ export function registerApi(router, ctx) {
     const rules = Array.isArray(body.rules) ? validateRules(body.rules) : null;
     const nameRules = body.name_rules === undefined ? null : checkNameRules(body.name_rules);
     if (nameRules?.error) throw new HttpError(400, nameRules.error);
+    // Sources keep only the guide days their outputs publish: more days, or a source newly
+    // added, needs a refresh to fetch the rest.
+    const guideSources = [...new Set([
+      ...db.all('SELECT source_id FROM output_sources WHERE output_id = ?', [o.id]).map((r) => r.source_id),
+      ...(Array.isArray(body.source_ids) ? body.source_ids.map(Number) : []),
+    ])];
+    const keptBefore = new Map(guideSources.map((sid) => [sid, guideDaysKept(db, sid)]));
 
     db.tx(() => {
       db.run(
@@ -1018,6 +1025,9 @@ export function registerApi(router, ctx) {
         });
       }
     });
+    for (const [sid, before] of keptBefore) {
+      if (guideDaysKept(db, sid) > before && db.get('SELECT 1 FROM sources WHERE id = ?', [sid])) ctx.jobs.enqueue(sid);
+    }
     touch();
     sendJson(res, 200, outputView(req, ctx, mustGet(db, 'outputs', o.id), true));
   });
