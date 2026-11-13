@@ -2749,6 +2749,11 @@ async function watchView(main, outputId, channelId) {
         found.items && !found.items.length ? h('p', { class: 'meta pad' }, 'Nothing matches.') : null,
         found.total > (found.items?.length || 0) ? h('p', { class: 'meta pad' }, `Showing ${found.items.length} of ${found.total}. Type more to narrow it down.`) : null);
     }
+    if (k.cat != null) {
+      const items = k.items.get(k.cat);
+      return fill(list, items ? rowsOf(items) : h('p', { class: 'meta pad' }, 'Loading…'),
+        items && !items.length ? h('p', { class: 'meta pad' }, 'Nothing here.') : null);
+    }
     fill(list,
       k.cats.map((c) => {
         const open = k.open.has(c.id);
@@ -2772,9 +2777,15 @@ async function watchView(main, outputId, channelId) {
     vod ||= { movie: { open: new Set(), items: new Map() }, series: { open: new Set(), items: new Map() }, episodes: new Map(), openSeries: new Set() };
     if (!vod[mode].cats) {
       drawList();
-      vod[mode].cats = (await api('GET', `/api/outputs/${oid}/vod?kind=${mode}`)).categories;
+      const m = mode;
+      vod[m].cats = (await api('GET', `/api/outputs/${oid}/vod?kind=${m}`)).categories;
+      try {
+        vod[m].cat = Number(localStorage.getItem(catKey(m))) || null;
+      } catch {}
     }
+    drawCats();
     drawList();
+    if (vod[mode].cat != null) loadItems(vod[mode].cat);
   };
   let searchTimer = null;
   const searchVod = () => {
@@ -2784,9 +2795,10 @@ async function watchView(main, outputId, channelId) {
     drawList();
     if (!found) return;
     const kind = mode;
+    const cid = vod[kind].cat;
     searchTimer = setTimeout(async () => {
-      const r = await api('GET', `/api/outputs/${oid}/vod?kind=${kind}&q=${encodeURIComponent(term)}`);
-      if (found?.q === term && mode === kind) {
+      const r = await api('GET', `/api/outputs/${oid}/vod?kind=${kind}&q=${encodeURIComponent(term)}${cid != null ? `&category_id=${cid}` : ''}`);
+      if (found?.q === term && mode === kind && vod[kind].cat === cid) {
         found = { q: term, items: r.items, total: r.total };
         drawList();
       }
@@ -2812,22 +2824,39 @@ async function watchView(main, outputId, channelId) {
     fill(list, ...out, rows.length ? null : h('p', { class: 'meta pad' }, lineup.channels.length ? 'No channels match.' : 'This output has no channels.'));
   };
 
-  // Live TV's categories, in the output's order, to show just one.
-  const catKey = () => `iptvm.watchCategory.${oid}`;
+  // The categories, in the output's order, to show just one: live TV's by name, movies' and
+  // series' by id (vod[mode].cat). Each is remembered per output.
+  const catKey = (m = mode) => `iptvm.watchCategory.${oid}${m === 'live' ? '' : `.${m}`}`;
   const catSelect = h('select', {
     class: 'watch-cat-select',
     title: 'Category',
     onchange: (e) => {
-      cat = e.target.value === '' ? null : e.target.value.slice(1);
+      const picked = e.target.value === '' ? null : e.target.value.slice(1);
       try {
-        if (cat == null) localStorage.removeItem(catKey());
-        else localStorage.setItem(catKey(), cat);
+        if (picked == null) localStorage.removeItem(catKey());
+        else localStorage.setItem(catKey(), picked);
       } catch {}
       list.scrollTop = 0;
+      if (mode === 'live') {
+        cat = picked;
+        return drawList();
+      }
+      vod[mode].cat = picked == null ? null : Number(picked);
+      if (found) return searchVod();
       drawList();
+      if (vod[mode].cat != null) loadItems(vod[mode].cat);
     },
   });
   const drawCats = () => {
+    if (mode !== 'live') {
+      const k = vod?.[mode];
+      catSelect.hidden = !k?.cats || k.cats.length < 2;
+      if (!k?.cats) return;
+      if (k.cat != null && !k.cats.some((c) => c.id === k.cat)) k.cat = null;
+      return fill(catSelect,
+        h('option', { value: '', selected: k.cat == null }, `All categories · ${k.cats.reduce((n, c) => n + c.count, 0)}`),
+        k.cats.map((c) => h('option', { value: `=${c.id}`, selected: k.cat === c.id }, `${c.name} · ${c.count}`)));
+    }
     const counts = new Map();
     for (const c of lineup.channels) counts.set(c.group || '', (counts.get(c.group || '') || 0) + 1);
     if (cat != null && !counts.has(cat)) cat = null;
@@ -2850,7 +2879,7 @@ async function watchView(main, outputId, channelId) {
     found = null;
     lineup = await api('GET', `/api/outputs/${oid}/lineup`);
     try {
-      cat = localStorage.getItem(catKey());
+      cat = localStorage.getItem(catKey('live'));
     } catch {
       cat = null;
     }
