@@ -1592,11 +1592,18 @@ test('stall diagnostics: provider pauses and viewers falling behind, on the dash
     await until(async () => (await row('Pausing')).health.burst_s > 0, 'rhythm learned');
     await new Promise((res) => setTimeout(res, 1500));
     assert.equal((await row('Pausing')).health.provider_pauses, 1, 'bursts are not pauses');
+    // One burst skipped now and then (a gap of twice the rhythm) isn't either: silent for less
+    // than the 360 ms between bursts, so at most one is missed.
+    live.paused.add('957');
+    await new Promise((res) => setTimeout(res, 300));
+    live.paused.delete('957');
+    await new Promise((res) => setTimeout(res, 800));
+    assert.equal((await row('Pausing')).health.provider_pauses, 1, 'a skipped burst is not a pause');
     live.paused.add('957');
     await new Promise((res) => setTimeout(res, 1300));
     live.paused.delete('957');
     await until(async () => (await row('Pausing')).health.provider_pauses === 2, 'a gap well past the rhythm is');
-    assert.ok(logs.some((l) => l.startsWith('Stream "Pausing": the provider sent nothing for') && l.includes('it usually sends every ~1 s; 2nd pause')), logs.join('\n'));
+    assert.ok(logs.some((l) => l.startsWith('Stream "Pausing": the provider sent nothing for') && /it usually sends every ~1 s(, sometimes ~\d+ s)?; 2nd pause/.test(l)), logs.join('\n'));
     live.bursty.delete('957');
 
     // Now and then two bursts together (a gap twice the usual): part of how the channel comes, not

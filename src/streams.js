@@ -154,10 +154,14 @@ class Hub {
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
   }
 
-  /** A gap this long is a pause: well past the longer gaps this stream usually has, and never under stallMs. */
+  /**
+   * A gap this long is a pause: well past the longer gaps this stream usually has, and never under
+   * stallMs. A single skipped burst (twice the rhythm) never is, however rarely it happens: one a
+   * few minutes apart is too rare to show in the learned gaps, and a player's buffer rides it out.
+   */
   pauseAfter() {
     const long = this.usualLong();
-    return long ? Math.max(this.streams.stallMs, 1.5 * long) : BOOTSTRAP_FACTOR * this.streams.stallMs;
+    return long ? Math.max(this.streams.stallMs, 1.5 * long, 2.5 * this.rhythm()) : BOOTSTRAP_FACTOR * this.streams.stallMs;
   }
 
   /**
