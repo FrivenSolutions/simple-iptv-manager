@@ -2390,6 +2390,7 @@ async function watchView(main, outputId, channelId) {
   const convertIds = new Set();
   let player = null;
   let q = '';
+  let cat = null; // live TV: the one category shown, or null for all (remembered per output)
 
   const video = h('video', { class: 'watch-video', controls: true, playsinline: true, preload: 'none' });
   const stage = h('div', { class: 'watch-stage' }, video);
@@ -2684,7 +2685,8 @@ async function watchView(main, outputId, channelId) {
 
   const filtered = () => {
     const t = q.trim().toLowerCase();
-    return lineup.channels.filter((c) => !t || c.name.toLowerCase().includes(t) || (c.group || '').toLowerCase().includes(t) || (c.now || '').toLowerCase().includes(t));
+    return lineup.channels.filter((c) => (cat == null || (c.group || '') === cat)
+      && (!t || c.name.toLowerCase().includes(t) || (c.group || '').toLowerCase().includes(t) || (c.now || '').toLowerCase().includes(t)));
   };
   const isOn = (x) => current && !!current.vod === !!x.vod && current.kind === x.kind && current.id === x.id;
   const vodRow = (item, sibs, extra = null) => h('button', { class: `watch-ch ${isOn(item) ? 'on' : ''}`, onclick: () => { item.siblings = sibs; playVod(item); } },
@@ -2810,6 +2812,32 @@ async function watchView(main, outputId, channelId) {
     fill(list, ...out, rows.length ? null : h('p', { class: 'meta pad' }, lineup.channels.length ? 'No channels match.' : 'This output has no channels.'));
   };
 
+  // Live TV's categories, in the output's order, to show just one.
+  const catKey = () => `iptvm.watchCategory.${oid}`;
+  const catSelect = h('select', {
+    class: 'watch-cat-select',
+    title: 'Category',
+    onchange: (e) => {
+      cat = e.target.value === '' ? null : e.target.value.slice(1);
+      try {
+        if (cat == null) localStorage.removeItem(catKey());
+        else localStorage.setItem(catKey(), cat);
+      } catch {}
+      list.scrollTop = 0;
+      drawList();
+    },
+  });
+  const drawCats = () => {
+    const counts = new Map();
+    for (const c of lineup.channels) counts.set(c.group || '', (counts.get(c.group || '') || 0) + 1);
+    if (cat != null && !counts.has(cat)) cat = null;
+    // Values carry a leading "=" so a category with no name ("Other") differs from "All".
+    fill(catSelect,
+      h('option', { value: '', selected: cat == null }, `All categories · ${lineup.channels.length}`),
+      [...counts].map(([g, n]) => h('option', { value: `=${g}`, selected: cat === g }, `${g || 'Other'} · ${n}`)));
+    catSelect.hidden = mode !== 'live' || counts.size < 2;
+  };
+
   const loadOutput = async () => {
     stop();
     current = null;
@@ -2821,6 +2849,12 @@ async function watchView(main, outputId, channelId) {
     vod = null;
     found = null;
     lineup = await api('GET', `/api/outputs/${oid}/lineup`);
+    try {
+      cat = localStorage.getItem(catKey());
+    } catch {
+      cat = null;
+    }
+    drawCats();
     if (window.MediaSource) for (const c of lineup.channels) if (c.codecs?.convert) convertIds.add(c.id);
     if (!outputs.find((x) => x.id === oid)?.vod_enabled) mode = 'live';
     drawTabs();
@@ -2850,6 +2884,7 @@ async function watchView(main, outputId, channelId) {
         search.placeholder = placeholders[m];
         found = null;
         drawTabs();
+        drawCats();
         if (m === 'live') drawList();
         else await loadVod();
       },
@@ -2886,8 +2921,13 @@ async function watchView(main, outputId, channelId) {
             }, 'Copy link'),
             h('button', { class: 'btn small', onclick: () => { wantPlaying = false; stop(); current = null; drawList(); fill(nowLine, h('span', { class: 'meta' }, 'Stopped.')); } }, 'Stop'))),
         message),
-      h('section', { class: 'card flush watch-channels' }, h('div', { class: 'pad watch-search' }, tabs, search), list)));
+      h('section', { class: 'card flush watch-channels' }, h('div', { class: 'pad watch-search' }, tabs, catSelect, search), list)));
   const start = mode === 'live' && channelId && lineup.channels.find((c) => c.id === channelId);
+  if (start && cat != null && (start.group || '') !== cat) {
+    // A bookmarked channel outside the remembered category: show them all.
+    cat = null;
+    drawCats();
+  }
   if (start) play(start);
 }
 

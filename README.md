@@ -482,7 +482,8 @@ off hides them again; anything already set up keeps working.
 ### Watch
 
 **Watch** in the top bar plays an output's channels in the browser. Pick the output, then a
-channel from the list, which is grouped by category with what's on now and searchable. Use
+channel from the list, which is grouped by category with what's on now and searchable. The
+dropdown above the list shows one category at a time, and the page remembers it per output. Use
 **Full screen** (or double-click the picture), and **‹ Prev** / **Next ›** to flip channels. The
 address of the page names the output and channel, so it can be bookmarked.
 
