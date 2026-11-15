@@ -410,6 +410,41 @@ export function evaluateCategories(db, output, kind = 'live') {
   return cats;
 }
 
+const activeChannels = (db, output) => {
+  const ids = output.sources.map((s) => s.id);
+  return db.all(`SELECT * FROM channels WHERE active = 1 AND source_id IN (${ids.map(() => '?').join(',')})`, ids);
+};
+
+// Whether a channel is in once its category is: hand picks, channel rules and hide options.
+function channelFilter(db, output, catById, rows) {
+  const chOverrides = new Map(
+    db.all('SELECT channel_id, state FROM output_channel_overrides WHERE output_id = ?', [output.id])
+      .map((r) => [r.channel_id, r.state]),
+  );
+  const emptyRegexes = compilePatterns(emptyEventPatterns(db));
+  const guide = guideHider(db, output, [...catById.values()], undefined,
+    guideIdsOf(rows.filter((ch) => catById.get(ch.category_id)?.hide_by_guide)));
+  return (ch, cat) => channelState(ch.name, true, cat.channel_rules, chOverrides.get(ch.id), hiddenReason(cat, ch, emptyRegexes, guide)).included;
+}
+
+/**
+ * Live categories of an output, each with in_count: how many of its channels the output carries
+ * while the category is in (all of them unless picked out by hand, by a rule or a hide option).
+ */
+export function categoriesWithCounts(db, output) {
+  const cats = evaluateCategories(db, output);
+  if (!cats.length) return cats;
+  const catById = new Map(cats.map((c) => [c.id, c]));
+  const rows = activeChannels(db, output);
+  const passes = channelFilter(db, output, catById, rows);
+  for (const c of cats) c.in_count = 0;
+  for (const ch of rows) {
+    const cat = catById.get(ch.category_id);
+    if (cat && passes(ch, cat)) cat.in_count++;
+  }
+  return cats;
+}
+
 /**
  * Resolve the final channel list for an output with every per-channel edit applied.
  * tvg ids are made unique per source so two providers' "news.us" never collide in one guide.
@@ -418,30 +453,18 @@ export function selectChannels(db, output) {
   const cats = evaluateCategories(db, output);
   if (!cats.length) return { categories: cats, channels: [] };
   const catById = new Map(cats.map((c) => [c.id, c]));
-  const chOverrides = new Map(
-    db.all('SELECT channel_id, state FROM output_channel_overrides WHERE output_id = ?', [output.id])
-      .map((r) => [r.channel_id, r.state]),
-  );
   const srcById = new Map(output.sources.map((s) => [s.id, s]));
-  const emptyRegexes = compilePatterns(emptyEventPatterns(db));
   const guideIcons = guideIconLookup(db, srcById);
   const clean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || []);
   const affix = categoryAffixer(output);
   const groupName = new Map(cats.map((c) => [c.id, affix(c.source_id, c.custom_name || clean.category(c.name, c.source_id))]));
-  const ids = output.sources.map((s) => s.id);
-  const rows = db.all(
-    `SELECT * FROM channels WHERE active = 1 AND source_id IN (${ids.map(() => '?').join(',')})`,
-    ids,
-  );
-  const guide = guideHider(db, output, cats, undefined, guideIdsOf(rows.filter((ch) => catById.get(ch.category_id)?.hide_by_guide)));
+  const rows = activeChannels(db, output);
+  const passes = channelFilter(db, output, catById, rows);
 
   const channels = [];
   for (const ch of rows) {
     const cat = catById.get(ch.category_id);
-    if (!cat) continue;
-    const hidden = hiddenReason(cat, ch, emptyRegexes, guide);
-    if (!channelState(ch.name, cat.included, cat.channel_rules, chOverrides.get(ch.id), hidden).included) continue;
-    channels.push({ ch, cat });
+    if (cat?.included && passes(ch, cat)) channels.push({ ch, cat });
   }
   // Categories in their order (sources first), then each category's channels in theirs.
   const catIndex = new Map(cats.map((c, i) => [c.id, i]));

@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { HttpError, sendJson, readJson, baseUrl } from './http.js';
 import { hashPassword, verifyPassword, makeSession, sessionCookie, randomToken, COOKIE } from './auth.js';
 import {
-  OPS, loadOutput, evaluateCategories, channelCompare, positionsOf, isNewCategory, channelState,
+  OPS, loadOutput, evaluateCategories, categoriesWithCounts, channelCompare, positionsOf, isNewCategory, channelState,
   DEFAULT_EMPTY_EVENT_PATTERNS, emptyEventPatterns, compilePatterns, isEmptyEvent,
   DEFAULT_GUIDE_PATTERNS, guidePatterns, guideHider, guideIdsOf, hiddenReason,
   checkNameRules, parseNameRules, nameCleaner, nowTitles, affixText,
@@ -1151,7 +1151,7 @@ export function registerApi(router, ctx) {
     if (!o) throw new HttpError(404, 'Not found');
     const kind = ['movie', 'series'].includes(query.get('kind')) ? query.get('kind') : 'live';
     const clean = cleanerFor(o, kind);
-    sendJson(res, 200, evaluateCategories(db, o, kind).map((c) => ({ ...c, clean_name: clean.category(c.name, c.source_id) })));
+    sendJson(res, 200, (kind === 'live' ? categoriesWithCounts(db, o) : evaluateCategories(db, o, kind)).map((c) => ({ ...c, clean_name: clean.category(c.name, c.source_id) })));
   });
 
   // The titles of one movie or series category in an output, each with its hand pick (if any)

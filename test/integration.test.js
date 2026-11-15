@@ -580,6 +580,10 @@ test('channel rules inside one category; manual channel picks still win', async 
   assert.deepEqual(view.rules.map((r) => [r.action, r.op, r.value]), [['exclude', 'contains', 'daily']]);
   const fox = view.channels.find((c) => c.name === 'US: Daily News');
   assert.deepEqual([fox.included, fox.reason], [false, 'rule']);
+  // The category list counts the channels that are in, next to the total.
+  const counted = (await api('GET', `/api/outputs/${outputId}/categories`)).data.find((c) => c.id === news.id);
+  assert.deepEqual([counted.in_count, counted.channel_count], [view.channels.filter((c) => c.included).length, view.channels.length]);
+  assert.ok(counted.in_count < counted.channel_count);
 
   await api('PUT', `/api/outputs/${outputId}/channels`, { ids: [fox.id], state: 'include' });
   assert.ok((await names()).includes('US: Daily News'), 'manual include beats the rule');

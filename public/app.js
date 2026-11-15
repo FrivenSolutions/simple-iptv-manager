@@ -1582,7 +1582,7 @@ async function outputEditor(main, id) {
       const st = evalCat(c);
       if (st.included) {
         inc++;
-        chans += c.channel_count;
+        chans += c.in_count ?? c.channel_count;
       }
     }
     summary.textContent = `${inc} of ${cats.length} categories · about ${chans} channels${dirty ? ' (preview)' : ''}`;
@@ -1598,7 +1598,7 @@ async function outputEditor(main, id) {
             c.channel_rules?.length ? badge(`${c.channel_rules.length} channel rule${c.channel_rules.length === 1 ? '' : 's'}`, 'info') : null,
             c.hide_empty ? badge('hides empty events', 'info') : null,
             c.hide_by_guide ? badge(c.hide_unlisted ? 'hides by guide + unlisted' : 'hides by guide', 'info') : null,
-            h('span', { class: 'meta' }, ` · ${c.channel_count} ch · ${reasonText(st)}`),
+            h('span', { class: 'meta' }, ` · ${st.included && c.in_count != null && c.in_count < c.channel_count ? `${c.in_count}/` : ''}${c.channel_count} ch · ${reasonText(st)}`),
             hitLine(c)),
           h('button', { class: 'icon-btn', title: 'Edit group (display name, Jellyfin category)', onclick: () => editCategory(c, drawCats) }, '✎'),
           h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
@@ -1705,6 +1705,7 @@ async function outputEditor(main, id) {
       await attempt(() => api('PUT', `/api/outputs/${id}/channels`, { ids, state }));
       await loadPanel(c, p);
       refreshCounts();
+      drawCats();
     };
     const chans = data.channels;
     // Arranged by hand: one column, so the order is plain to see.
@@ -1751,6 +1752,7 @@ async function outputEditor(main, id) {
     });
 
     const included = chans.filter((ch) => ch.included).length;
+    if (!off) c.in_count = included;
     const overridden = chans.filter((ch) => ch.override).map((ch) => ch.id);
     const reason = (ch) => CH_REASONS[ch.reason] || '';
     const emptyCount = chans.filter((ch) => ch.is_empty_event).length;
