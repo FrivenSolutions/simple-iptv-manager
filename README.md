@@ -295,14 +295,16 @@ suffix. Filter rules aren't affected: they still match the provider's names.
 
 ### Combining categories
 
-Live TV categories that players would see under the same name (ignoring case) are combined into
-one group in that output, even across sources: one group in the playlist, the guide, the Xtream
-Codes login and Watch. To combine two, give them the same display name with ✎ (the name box
-suggests the names already in use). To keep them apart, rename one, or give their sources
-different prefixes. The group sits where its first category is, and the others are listed right
-under it, each still included or excluded on its own. Expand the group to see all its channels in
-one list, with where each comes from. Its **Sort** (by name or Custom, across all of them), channel
-rules and hide options apply to every category in it. Movie and series categories aren't combined.
+Live TV categories in an output that players would see under the same name (ignoring case, and
+after name cleanup) are combined into one group, even across sources: one group in the playlist,
+the guide, the Xtream Codes login and Watch. To combine two, give them the same display name with
+✎ (the name box suggests the names already in use). To keep them apart, rename one, or give their
+sources different prefixes. Only categories that are in the output combine: excluding one takes
+it out of its group, so name cleanup that turns "UK | News" and "US | News" into "News" only
+matters for the ones you include. The group sits where its first category is, and the others are
+listed right under it. Expand the group to see all its channels in one list, with where each comes
+from. Its **Sort** (by name or Custom, across all of them), channel rules and hide options apply to
+every category in it. Movie and series categories aren't combined.
 
 ### How filtering decides
 
