@@ -367,12 +367,14 @@ export function channelCompare(output, cat, clean, positions, catOrder = null) {
  * Live categories that players would see under the same name are combined into one group. It
  * sits where its first category is, the others right behind it in their own order; the first
  * category's name and channel sort stand for the group. Sets group_lead and group_size.
+ * Only categories in the output combine: name cleanup can give a dozen excluded ones ("UK | News",
+ * "CA | News") the name of one that is in, and they mustn't move it or take its settings.
  */
 function combineByName(cats, shown) {
   const leads = new Map();
   const members = new Map();
   for (const c of cats) {
-    const key = shown(c).trim().toLowerCase();
+    const key = c.included ? shown(c).trim().toLowerCase() : `#${c.id}`;
     if (!leads.has(key)) {
       leads.set(key, c.id);
       members.set(c.id, []);

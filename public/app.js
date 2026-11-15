@@ -1588,6 +1588,11 @@ async function outputEditor(main, id) {
     for (const c of cats) if (ids.includes(c.id)) c.override = state;
     drawCats();
     refreshCounts();
+    // Only categories in the output combine, so including or excluding one can regroup them.
+    if (!dirty) {
+      cats = await api('GET', `/api/outputs/${id}/categories`);
+      drawCats();
+    }
   };
   const drawCats = () => {
     const rows = visible();
@@ -1616,7 +1621,7 @@ async function outputEditor(main, id) {
         const g = c.group_lead ?? c.id;
         const combined = c.group_size > 1;
         const host = firstShown.get(g) === c.id;
-        const follower = combined && c.id !== g;
+        const follower = combined && !host; // indented under the group's first row on screen
         const seg = (label, val, cls) => h('button', { class: `${c.override === val ? 'on' : ''} ${cls}`, title: val ? `Always ${val}` : 'Follow the rules', onclick: () => setOverride([c.id], val) }, label);
         const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'} ${follower ? 'combined-row' : ''}` },
           host

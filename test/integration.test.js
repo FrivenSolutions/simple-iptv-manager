@@ -634,6 +634,12 @@ test('categories with the same name combine into one group, its channels togethe
   const again = (await api('GET', `/api/outputs/${o.id}/categories`)).data;
   assert.deepEqual(again.filter((c) => c.group_lead === xcNews.id).map((c) => [c.channel_rules.length, c.in_count]), [[1, 1], [1, 0]]);
 
+  // An excluded one doesn't combine: it can't move the group or take its settings.
+  await api('PUT', `/api/outputs/${o.id}/categories`, { ids: [xcNews.id], state: 'exclude' });
+  const split = (await api('GET', `/api/outputs/${o.id}/categories`)).data;
+  assert.deepEqual(split.filter((c) => [xcNews.id, m3uNews.id].includes(c.id)).map((c) => [c.group_lead, c.group_size]), [[xcNews.id, 1], [m3uNews.id, 1]]);
+  await api('PUT', `/api/outputs/${o.id}/categories`, { ids: [xcNews.id], state: null });
+
   // One renamed: two groups again.
   await api('PUT', `/api/categories/${m3uNews.id}`, { custom_name: 'Other news' });
   assert.equal((await api('GET', `/api/outputs/${o.id}/categories`)).data.find((c) => c.id === m3uNews.id).group_size, 1);
