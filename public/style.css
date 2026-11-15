@@ -278,6 +278,10 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; backgr
 .hit-chip:hover { border-color: var(--accent); }
 .ch-row.hit { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
 .expander { background: none; border: 0; cursor: pointer; color: var(--muted); width: 18px; padding: 0; font: inherit; }
+.expander-gap { width: 18px; flex: none; }
+.cat-row.combined-row { padding-left: 28px; }
+.combined-note { margin: 0 0 8px; }
+.ch-from { font-size: 12px; }
 .ch-panel { padding: 10px 12px 12px 48px; background: var(--panel-2); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
 .ch-rules { display: flex; flex-direction: column; gap: 6px; }
 .ch-option { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }

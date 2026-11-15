@@ -347,16 +347,42 @@ export const positionsOf = (db, table, column, outputId) =>
  * How two channels of one category compare in an output: by the category's own sort, else the
  * output's. Names are the ones players see. Rules never look at this; they use provider names.
  */
-export function channelCompare(output, cat, clean, positions) {
+export function channelCompare(output, cat, clean, positions, catOrder = null) {
   const mode = cat.ch_sort || output.ch_sort || 'provider';
   const names = new Map();
   const shown = (ch) => {
-    if (!names.has(ch.id)) names.set(ch.id, ch.custom_name || clean.channel(ch.name, cat.source_id));
+    if (!names.has(ch.id)) names.set(ch.id, ch.custom_name || clean.channel(ch.name, ch.source_id ?? cat.source_id));
     return names.get(ch.id);
   };
-  if (mode === 'name') return (a, b) => byName(shown(a), shown(b)) || a.sort - b.sort;
-  if (mode === 'custom') return (a, b) => byPosition(positions, a, b) || a.sort - b.sort;
-  return (a, b) => a.sort - b.sort;
+  // A combined group: provider order is category by category, in the group's order.
+  const provider = catOrder
+    ? (a, b) => (catOrder.get(a.category_id) ?? 0) - (catOrder.get(b.category_id) ?? 0) || a.sort - b.sort
+    : (a, b) => a.sort - b.sort;
+  if (mode === 'name') return (a, b) => byName(shown(a), shown(b)) || provider(a, b);
+  if (mode === 'custom') return (a, b) => byPosition(positions, a, b) || provider(a, b);
+  return provider;
+}
+
+/**
+ * Live categories that players would see under the same name are combined into one group. It
+ * sits where its first category is, the others right behind it in their own order; the first
+ * category's name and channel sort stand for the group. Sets group_lead and group_size.
+ */
+function combineByName(cats, shown) {
+  const leads = new Map();
+  const members = new Map();
+  for (const c of cats) {
+    const key = shown(c).trim().toLowerCase();
+    if (!leads.has(key)) {
+      leads.set(key, c.id);
+      members.set(c.id, []);
+    }
+    c.group_lead = leads.get(key);
+    members.get(c.group_lead).push(c);
+  }
+  const ordered = [...members.values()].flat();
+  for (const c of ordered) c.group_size = members.get(c.group_lead).length;
+  cats.splice(0, cats.length, ...ordered);
 }
 
 /** Categories from every source attached to the output, each with its decision. */
@@ -407,6 +433,7 @@ export function evaluateCategories(db, output, kind = 'live') {
     c.is_new = isNewCategory(c);
     c.jellyfin = parseJellyfin(c.jellyfin);
   }
+  if (kind === 'live') combineByName(cats, shownCat);
   return cats;
 }
 
@@ -457,7 +484,8 @@ export function selectChannels(db, output) {
   const guideIcons = guideIconLookup(db, srcById);
   const clean = nameCleaner(checkNameRules(parseNameRules(output.name_rules)).rules || []);
   const affix = categoryAffixer(output);
-  const groupName = new Map(cats.map((c) => [c.id, affix(c.source_id, c.custom_name || clean.category(c.name, c.source_id))]));
+  const lead = (c) => catById.get(c.group_lead) || c;
+  const groupName = new Map(cats.map((c) => [c.id, affix(lead(c).source_id, lead(c).custom_name || clean.category(lead(c).name, lead(c).source_id))]));
   const rows = activeChannels(db, output);
   const passes = channelFilter(db, output, catById, rows);
 
@@ -466,11 +494,11 @@ export function selectChannels(db, output) {
     const cat = catById.get(ch.category_id);
     if (cat?.included && passes(ch, cat)) channels.push({ ch, cat });
   }
-  // Categories in their order (sources first), then each category's channels in theirs.
+  // Groups in their order (sources first), then each group's channels in its sort.
   const catIndex = new Map(cats.map((c, i) => [c.id, i]));
   const chPositions = positionsOf(db, 'output_channel_order', 'channel_id', output.id);
-  const compare = new Map(cats.map((c) => [c.id, channelCompare(output, c, clean, chPositions)]));
-  channels.sort((a, b) => catIndex.get(a.cat.id) - catIndex.get(b.cat.id) || compare.get(a.cat.id)(a.ch, b.ch));
+  const compare = new Map(cats.filter((c) => c.group_lead === c.id).map((c) => [c.id, channelCompare(output, c, clean, chPositions, catIndex)]));
+  channels.sort((a, b) => catIndex.get(a.cat.group_lead) - catIndex.get(b.cat.group_lead) || compare.get(a.cat.group_lead)(a.ch, b.ch));
 
   const idOwner = new Map(); // output tvg-id -> "sourceId|epgId"
   let num = output.number_start != null ? Number(output.number_start) : null;
@@ -493,7 +521,7 @@ export function selectChannels(db, output) {
     return {
       id: ch.id,
       source_id: ch.source_id,
-      category_id: cat.id,
+      category_id: cat.group_lead, // a combined group is one category to players
       name: ch.custom_name || clean.channel(ch.name, ch.source_id),
       // No provider logo: borrow the one the guide lists for this channel.
       logo: ch.custom_logo || ch.logo || (epgId && guideIcons(ch.source_id).get(epgId)) || '',

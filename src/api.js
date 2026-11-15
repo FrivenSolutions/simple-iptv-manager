@@ -1240,23 +1240,30 @@ export function registerApi(router, ctx) {
     const o = loadOutput(db, Number(params.id));
     if (!o) throw new HttpError(404, 'Not found');
     const catId = Number(query.get('category_id'));
-    const cat = evaluateCategories(db, o).find((c) => c.id === catId);
-    if (!cat) throw new HttpError(404, 'Category is not part of this output');
+    const all = evaluateCategories(db, o);
+    const asked = all.find((c) => c.id === catId);
+    if (!asked) throw new HttpError(404, 'Category is not part of this output');
+    // A combined group shows as one list: the channels of all its categories, in the group's
+    // sort. The first category's settings stand for the group (changes go to all of them).
+    const members = all.filter((c) => c.group_lead === asked.group_lead);
+    const cat = members[0];
+    const memberById = new Map(members.map((c) => [c.id, c]));
     const overrides = new Map(db.all('SELECT channel_id, state FROM output_channel_overrides WHERE output_id = ?', [o.id])
       .map((r) => [r.channel_id, r.state]));
     const rows = db.all(
-      `SELECT id, name, custom_name, logo, custom_logo, epg_id, custom_epg_id, tvg_id, sort, first_seen
-         FROM channels WHERE category_id = ? AND active = 1 ORDER BY sort`,
-      [catId],
+      `SELECT id, name, custom_name, logo, custom_logo, epg_id, custom_epg_id, tvg_id, sort, first_seen, category_id, source_id
+         FROM channels WHERE category_id IN (${members.map(() => '?').join(',')}) AND active = 1 ORDER BY sort`,
+      members.map((c) => c.id),
     );
     const clean = cleanerFor(o, 'live');
-    rows.sort(channelCompare(o, cat, clean, positionsOf(db, 'output_channel_order', 'channel_id', o.id)));
-    const firstRefresh = db.get('SELECT first_refresh_at FROM sources WHERE id = ?', [cat.source_id])?.first_refresh_at || 0;
+    rows.sort(channelCompare(o, cat, clean, positionsOf(db, 'output_channel_order', 'channel_id', o.id), new Map(members.map((c, i) => [c.id, i]))));
+    const firstRefresh = new Map(members.map((c) => [c.source_id, db.get('SELECT first_refresh_at FROM sources WHERE id = ?', [c.source_id])?.first_refresh_at || 0]));
     const emptyRegexes = compilePatterns(emptyEventPatterns(db));
     // What is on now is shown even with the toggle off, so its effect can be judged first.
-    const guide = guideHider(db, o, [{ ...cat, hide_by_guide: true }], undefined, guideIdsOf(rows));
+    const guide = guideHider(db, o, members.map((c) => ({ ...c, hide_by_guide: true })), undefined, guideIdsOf(rows));
     sendJson(res, 200, {
-      category_included: cat.included,
+      category_included: members.some((c) => c.included),
+      group: members.map((c) => c.id),
       ch_sort: cat.ch_sort, // this category's own sort, null when it follows the output
       sort_mode: cat.ch_sort || o.ch_sort || 'provider',
       hide_empty: cat.hide_empty,
@@ -1264,23 +1271,25 @@ export function registerApi(router, ctx) {
       hide_unlisted: cat.hide_unlisted,
       unlisted_hours: cat.unlisted_hours,
       // False when the source's guide has nothing airing now at all (stale or failed refresh).
-      guide_current: guide.guideCurrent({ source_id: cat.source_id }),
+      guide_current: members.some((c) => guide.guideCurrent({ source_id: c.source_id })),
       rules: cat.channel_rules.map(({ id, action, op, value }) => ({ id, action, op, value })),
       channels: rows.map((r) => {
         const override = overrides.get(r.id) || null;
-        const ch = { ...r, source_id: cat.source_id };
+        const ch = r;
+        const own = memberById.get(r.category_id);
         return {
           ...r, override,
-          clean_name: clean.channel(r.name, cat.source_id),
+          category_included: own.included,
+          clean_name: clean.channel(r.name, r.source_id),
           // Added since the source's first refresh, in the last week.
-          is_new: r.first_seen > firstRefresh + 60 && r.first_seen > now() - NEW_CHANNEL_S,
+          is_new: r.first_seen > (firstRefresh.get(r.source_id) || 0) + 60 && r.first_seen > now() - NEW_CHANNEL_S,
           is_empty_event: isEmptyEvent(r.name, emptyRegexes),
           now_title: guide.titleOf(ch),
           is_guide_placeholder: guide.isPlaceholder(ch),
-          is_unlisted: guide.isUnlisted(ch, cat.unlisted_hours),
+          is_unlisted: guide.isUnlisted(ch, own.unlisted_hours),
           // Nothing on now: the next listing within the look-ahead, if any.
           next: guide.titleOf(ch) ? null : guide.nextOf(ch),
-          ...channelState(r.name, cat.included, cat.channel_rules, override, hiddenReason(cat, ch, emptyRegexes, guide)),
+          ...channelState(r.name, own.included, own.channel_rules, override, hiddenReason(own, ch, emptyRegexes, guide)),
         };
       }),
     });
@@ -1391,6 +1400,17 @@ export function registerApi(router, ctx) {
   });
 
   // Per-category switches for one output; only the switches present in the body change.
+  // A live category and those combined with it in the output (same shown name), first one first.
+  const groupOf = (output, catId) => {
+    const all = output ? evaluateCategories(db, output) : [];
+    const cat = all.find((c) => c.id === Number(catId));
+    return cat ? all.filter((c) => c.group_lead === cat.group_lead) : [];
+  };
+  const groupIds = (outputId, catId) => {
+    const ids = groupOf(loadOutput(db, outputId), catId).map((c) => c.id);
+    return ids.length ? ids : [Number(catId)];
+  };
+
   router.put('/api/outputs/:id/categories/:catId/options', async (req, res, { params }) => {
     const o = mustGet(db, 'outputs', params.id);
     const cat = mustGet(db, 'categories', params.catId);
@@ -1400,13 +1420,17 @@ export function registerApi(router, ctx) {
     const val = (k) => (body[k] === undefined ? cur[k] : bool(body[k]));
     // Look-ahead for "nothing listed": 1 hour to a week.
     const hours = body.unlisted_hours === undefined ? cur.unlisted_hours : int(body.unlisted_hours, 24, 1, 168);
-    db.run(
-      `INSERT INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (output_id, category_id) DO UPDATE SET
-         hide_empty = excluded.hide_empty, hide_by_guide = excluded.hide_by_guide, hide_unlisted = excluded.hide_unlisted,
-         unlisted_hours = excluded.unlisted_hours`,
-      [o.id, cat.id, val('hide_empty'), val('hide_by_guide'), val('hide_unlisted'), hours],
-    );
+    db.tx(() => {
+      for (const cid of groupIds(o.id, cat.id)) {
+        db.run(
+          `INSERT INTO output_category_settings (output_id, category_id, hide_empty, hide_by_guide, hide_unlisted, unlisted_hours) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (output_id, category_id) DO UPDATE SET
+             hide_empty = excluded.hide_empty, hide_by_guide = excluded.hide_by_guide, hide_unlisted = excluded.hide_unlisted,
+             unlisted_hours = excluded.unlisted_hours`,
+          [o.id, cid, val('hide_empty'), val('hide_by_guide'), val('hide_unlisted'), hours],
+        );
+      }
+    });
     touch();
     sendJson(res, 200, { ok: true });
   });
@@ -1429,15 +1453,17 @@ export function registerApi(router, ctx) {
     const clean = cleanerFor(o, 'live');
     const positions = positionsOf(db, 'output_channel_order', 'channel_id', o.id);
     const byCat = new Map();
-    for (const r of db.all(`SELECT id, name, custom_name, sort, category_id FROM channels
+    for (const r of db.all(`SELECT id, name, custom_name, sort, category_id, source_id FROM channels
                              WHERE active = 1 AND source_id IN (${o.sources.map(() => '?').join(',')})`, o.sources.map((s) => s.id))) {
       if (!byCat.has(r.category_id)) byCat.set(r.category_id, []);
       byCat.get(r.category_id).push(r);
     }
-    const ids = evaluateCategories(db, o).filter((c) => !c.ch_sort).flatMap((c) => {
-      const rows = byCat.get(c.id) || [];
+    const cats = evaluateCategories(db, o);
+    const catOrder = new Map(cats.map((c, i) => [c.id, i]));
+    const ids = cats.filter((c) => c.group_lead === c.id && !c.ch_sort).flatMap((c) => {
+      const rows = cats.filter((m) => m.group_lead === c.id).flatMap((m) => byCat.get(m.id) || []);
       if (rows.some((r) => positions.has(r.id))) return [];
-      return rows.sort(channelCompare(o, c, clean, positions)).map((r) => r.id);
+      return rows.sort(channelCompare(o, c, clean, positions, catOrder)).map((r) => r.id);
     });
     replaceOrder('output_channel_order', 'channel_id', o.id, ids);
   };
@@ -1471,21 +1497,29 @@ export function registerApi(router, ctx) {
   router.put('/api/outputs/:id/categories/:catId/channel-sort', async (req, res, { params }) => {
     const o = loadOutput(db, Number(params.id));
     if (!o) throw new HttpError(404, 'Not found');
-    const cat = evaluateCategories(db, o).find((c) => c.id === Number(params.catId));
-    if (!cat) throw new HttpError(404, 'Category is not part of this output');
+    const members = groupOf(o, params.catId);
+    if (!members.length) throw new HttpError(404, 'Category is not part of this output');
     const { mode = null } = await readJson(req);
     if (![null, 'provider', 'name', 'custom'].includes(mode)) throw new HttpError(400, 'Unknown sort');
     if (mode === 'custom') {
-      const rows = db.all('SELECT id, name, custom_name, sort FROM channels WHERE category_id = ? AND active = 1 ORDER BY sort', [cat.id]);
+      const rows = db.all(
+        `SELECT id, name, custom_name, sort, category_id, source_id FROM channels
+          WHERE category_id IN (${members.map(() => '?').join(',')}) AND active = 1 ORDER BY sort`,
+        members.map((c) => c.id),
+      );
       const positions = positionsOf(db, 'output_channel_order', 'channel_id', o.id);
-      // First time on Custom for this category: start from the order on screen.
+      // First time on Custom for this category (or group): start from the order on screen.
       if (!rows.some((r) => positions.has(r.id))) {
-        rows.sort(channelCompare(o, cat, cleanerFor(o, 'live'), positions));
+        rows.sort(channelCompare(o, members[0], cleanerFor(o, 'live'), positions, new Map(members.map((c, i) => [c.id, i]))));
         replaceOrder('output_channel_order', 'channel_id', o.id, rows.map((r) => r.id));
       }
     }
-    db.run(`INSERT INTO output_category_settings (output_id, category_id, ch_sort) VALUES (?, ?, ?)
-            ON CONFLICT(output_id, category_id) DO UPDATE SET ch_sort = excluded.ch_sort`, [o.id, cat.id, mode]);
+    db.tx(() => {
+      for (const c of members) {
+        db.run(`INSERT INTO output_category_settings (output_id, category_id, ch_sort) VALUES (?, ?, ?)
+                ON CONFLICT(output_id, category_id) DO UPDATE SET ch_sort = excluded.ch_sort`, [o.id, c.id, mode]);
+      }
+    });
     touch();
     sendJson(res, 200, { ok: true });
   });
@@ -1502,13 +1536,16 @@ export function registerApi(router, ctx) {
     const body = await readJson(req);
     if (!Array.isArray(body.rules)) throw new HttpError(400, 'rules must be a list');
     const rules = validateRules(body.rules);
+    const ids = groupIds(o.id, cat.id);
     db.tx(() => {
-      db.run('DELETE FROM output_channel_rules WHERE output_id = ? AND category_id = ?', [o.id, cat.id]);
-      rules.forEach((r, i) => {
-        db.run('INSERT INTO output_channel_rules (output_id, category_id, action, op, value, sort) VALUES (?, ?, ?, ?, ?, ?)', [
-          o.id, cat.id, r.action, r.op, r.value, i,
-        ]);
-      });
+      for (const cid of ids) {
+        db.run('DELETE FROM output_channel_rules WHERE output_id = ? AND category_id = ?', [o.id, cid]);
+        rules.forEach((r, i) => {
+          db.run('INSERT INTO output_channel_rules (output_id, category_id, action, op, value, sort) VALUES (?, ?, ?, ?, ?, ?)', [
+            o.id, cid, r.action, r.op, r.value, i,
+          ]);
+        });
+      }
     });
     touch();
     sendJson(res, 200, { ok: true });

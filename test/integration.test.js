@@ -434,10 +434,11 @@ test('M3U output: order, numbering, proxied URLs and EPG link', async () => {
   assert.equal(res.status, 200);
   const text = await res.text();
   const names = [...text.matchAll(/,([^\n]+)\n/g)].map((m) => m[1]);
-  assert.deepEqual(names, ['US: NewsNet HD', 'US: Daily News', 'Kingdom One HD', 'Vista 1', 'NewsNet']);
+  // Both sources have a "US| NEWS": one combined group, where the first of them is.
+  assert.deepEqual(names, ['US: NewsNet HD', 'US: Daily News', 'NewsNet', 'Kingdom One HD', 'Vista 1']);
   assert.match(text, /^#EXTM3U url-tvg="http:\/\/127\.0\.0\.1:\d+\/o\/[^/]+\/epg\.xml"/);
   assert.match(text, /tvg-chno="100"[^\n]*,US: NewsNet HD/);
-  assert.match(text, /tvg-chno="104"[^\n]*,NewsNet/);
+  assert.match(text, /tvg-chno="102"[^\n]*,NewsNet/);
   // newsnet.us exists in both sources: the second gets a source-scoped id.
   assert.match(text, /tvg-id="newsnet\.us"[^\n]*,US: NewsNet HD/);
   assert.match(text, new RegExp(`tvg-id="newsnet\\.us\\.s${m3uId}"[^\\n]*,NewsNet`));
@@ -505,9 +506,10 @@ test('Xtream Codes output API', async () => {
   assert.equal(info.user_info.auth, 1);
   assert.equal((await (await fetch(`${base}/player_api.php?username=family&password=wrong`)).json()).user_info.auth, 0);
   const cats = await q('get_live_categories');
-  assert.deepEqual(cats.map((c) => c.category_name), ['US| NEWS', 'UK| GENERAL', 'US| NEWS']);
+  assert.deepEqual(cats.map((c) => c.category_name), ['US| NEWS', 'UK| GENERAL'], 'same-named categories are one');
   const streams = await q('get_live_streams');
   assert.equal(streams.length, 5);
+  assert.equal((await q('get_live_streams', `&category_id=${cats[0].category_id}`)).length, 3);
   const inCat = await q('get_live_streams', `&category_id=${cats[1].category_id}`);
   assert.deepEqual(inCat.map((s) => s.name), ['Kingdom One HD', 'Vista 1']);
   assert.deepEqual(await q('get_vod_streams'), []);
@@ -567,6 +569,9 @@ test('channel edits and per-output channel overrides', async () => {
 test('channel rules inside one category; manual channel picks still win', async () => {
   const cats = (await api('GET', `/api/outputs/${outputId}/categories`)).data;
   const news = cats.find((c) => c.name === 'US| NEWS' && c.source_id === xcId);
+  // Renamed for this test, so it isn't combined with the XC one.
+  const m3uNews = cats.find((c) => c.name === 'US| NEWS' && c.source_id === m3uId);
+  await api('PUT', `/api/categories/${m3uNews.id}`, { custom_name: 'US| NEWS (M3U)' });
   const names = async () => [...(await (await fetch(`${base}/o/${token}/playlist.m3u`)).text()).matchAll(/,([^\n]+)\n/g)].map((m) => m[1]);
 
   assert.equal((await api('PUT', `/api/outputs/${outputId}/categories/${news.id}/channel-rules`, { rules: [{ action: 'exclude', op: 'wat', value: 'x' }] })).status, 400);
@@ -594,6 +599,46 @@ test('channel rules inside one category; manual channel picks still win', async 
   assert.ok(list.includes('US: NewsNet HD') && !list.includes('US: Daily News'));
   const newsnet = (await api('GET', `/api/outputs/${outputId}/channels?category_id=${news.id}`)).data.channels.find((c) => c.name === 'US: NewsNet HD');
   assert.equal(newsnet.reason, 'rule');
+  await api('PUT', `/api/categories/${m3uNews.id}`, { custom_name: '' });
+});
+
+test('categories with the same name combine into one group, its channels together in one sort', async () => {
+  const o = (await api('POST', '/api/outputs', { name: 'Combined' })).data;
+  await api('PUT', `/api/outputs/${o.id}`, { source_ids: [xcId, m3uId], rules: [{ action: 'include', op: 'equals', value: 'us| news' }] });
+  const cats = (await api('GET', `/api/outputs/${o.id}/categories`)).data;
+  const xcNews = cats.find((c) => c.name === 'US| NEWS' && c.source_id === xcId);
+  const m3uNews = cats.find((c) => c.name === 'US| NEWS' && c.source_id === m3uId);
+  assert.deepEqual([xcNews.group_lead, m3uNews.group_lead, m3uNews.group_size], [xcNews.id, xcNews.id, 2]);
+  assert.equal(cats.indexOf(m3uNews), cats.indexOf(xcNews) + 1, 'listed together');
+  const playlist = async () => [...(await (await fetch(`${base}/o/${o.token}/playlist.m3u`)).text())
+    .matchAll(/group-title="([^"]*)"[^\n]*,([^\n]+)\n/g)].map((m) => `${m[1]}/${m[2]}`);
+  assert.deepEqual(await playlist(), ['US| NEWS/US: NewsNet HD', 'US| NEWS/US: Daily News', 'US| NEWS/NewsNet']);
+
+  // One channel list for the group, from either of its categories, each channel with where it's from.
+  const view = (await api('GET', `/api/outputs/${o.id}/channels?category_id=${m3uNews.id}`)).data;
+  assert.deepEqual(view.group, [xcNews.id, m3uNews.id]);
+  assert.deepEqual(view.channels.map((c) => [c.name, c.category_id]), [['US: NewsNet HD', xcNews.id], ['US: Daily News', xcNews.id], ['NewsNet', m3uNews.id]]);
+
+  // Sorted by name across the group, then arranged by hand across it.
+  await api('PUT', `/api/outputs/${o.id}/categories/${m3uNews.id}/channel-sort`, { mode: 'name' });
+  assert.deepEqual(await playlist(), ['US| NEWS/NewsNet', 'US| NEWS/US: Daily News', 'US| NEWS/US: NewsNet HD']);
+  await api('PUT', `/api/outputs/${o.id}/categories/${xcNews.id}/channel-sort`, { mode: 'custom' });
+  assert.deepEqual(await playlist(), ['US| NEWS/NewsNet', 'US| NEWS/US: Daily News', 'US| NEWS/US: NewsNet HD'], 'custom starts from the order on screen');
+  const ids = Object.fromEntries(view.channels.map((c) => [c.name, c.id]));
+  await api('PUT', `/api/outputs/${o.id}/categories/${xcNews.id}/channel-order`, { ids: [ids['US: Daily News'], ids.NewsNet, ids['US: NewsNet HD']] });
+  assert.deepEqual(await playlist(), ['US| NEWS/US: Daily News', 'US| NEWS/NewsNet', 'US| NEWS/US: NewsNet HD']);
+
+  // Channel rules and hide options set on the group go to all its categories.
+  await api('PUT', `/api/outputs/${o.id}/categories/${xcNews.id}/channel-rules`, { rules: [{ action: 'exclude', op: 'contains', value: 'newsnet' }] });
+  assert.deepEqual(await playlist(), ['US| NEWS/US: Daily News']);
+  const again = (await api('GET', `/api/outputs/${o.id}/categories`)).data;
+  assert.deepEqual(again.filter((c) => c.group_lead === xcNews.id).map((c) => [c.channel_rules.length, c.in_count]), [[1, 1], [1, 0]]);
+
+  // One renamed: two groups again.
+  await api('PUT', `/api/categories/${m3uNews.id}`, { custom_name: 'Other news' });
+  assert.equal((await api('GET', `/api/outputs/${o.id}/categories`)).data.find((c) => c.id === m3uNews.id).group_size, 1);
+  await api('PUT', `/api/categories/${m3uNews.id}`, { custom_name: '' });
+  await api('DELETE', `/api/outputs/${o.id}`);
 });
 
 test('find a channel across an output: every attached source, with its state and why', async () => {

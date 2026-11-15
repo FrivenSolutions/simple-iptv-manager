@@ -1015,14 +1015,17 @@ function jellyfinBadges(cat) {
 
 /** Group-level settings shared by every channel in it: display name and Jellyfin guide categories. */
 // vod: a movie or series category, which has a display name but no guide (so no Jellyfin tags).
-function editCategory(cat, onSaved, { vod = false } = {}) {
-  const name = h('input', { value: cat.custom_name || '', placeholder: cat.name });
+function editCategory(cat, onSaved, { vod = false, names = [] } = {}) {
+  const list = h('datalist', { id: `cat-names-${cat.id}` }, [...new Set(names)].filter(Boolean).sort((a, b) => a.localeCompare(b)).map((n) => h('option', { value: n })));
+  const name = h('input', { value: cat.custom_name || '', placeholder: cat.name, list: list.id });
   const boxes = JELLYFIN_CATEGORIES.map(([value, label]) => {
     const box = h('input', { type: 'checkbox', value, checked: (cat.jellyfin || []).includes(value) });
     return h('label', { class: 'check' }, box, ` ${label}`);
   });
   const close = modal(`${vod ? 'Rename category' : 'Edit group'}: ${cat.custom_name || cat.name}`, h('div', { class: 'form' },
-    field('Display name in outputs', name, 'Leave empty to use the provider\'s name. Filter rules still match the provider\'s name.'),
+    field('Display name in outputs', name, 'Leave empty to use the provider\'s name. Filter rules still match the provider\'s name.'
+      + (vod ? '' : ' Give categories the same name to combine them: an output that has both shows them as one group.')),
+    list,
     vod ? null : h('div', { class: 'field' },
       h('span', { class: 'field-label' }, 'Jellyfin category'),
       h('span', { class: 'hint' },
@@ -1283,41 +1286,53 @@ async function outputEditor(main, id) {
   };
   // shown: the rows on screen, which Hide excluded or a search may have thinned out. A move goes
   // past the next one of those; rows out of sight stay where they are in the full list.
+  // A combined group (live categories sharing a name) moves as one.
   const arrangeCategory = (row, c, list, shown, redraw) => {
+    const lead = (x) => x.group_lead ?? x.id;
+    const srcOf = (x) => list.find((y) => y.id === lead(x))?.source_id ?? x.source_id;
     const i = shown.indexOf(c);
     const save = () => attempt(() => api('PUT', `/api/outputs/${id}/category-order`, { ids: list.map((x) => x.id) }));
     const before = (movedId, target) => {
-      const moved = list.find((x) => x.id === movedId);
-      list.splice(list.indexOf(moved), 1);
-      list.splice(list.indexOf(target), 0, moved);
+      const g = lead(list.find((x) => x.id === movedId));
+      if (g === lead(target)) return;
+      const moving = list.filter((x) => lead(x) === g);
+      for (const m of moving) list.splice(list.indexOf(m), 1);
+      list.splice(list.findIndex((x) => lead(x) === lead(target)), 0, ...moving);
       redraw();
       save();
     };
-    const same = (x) => x && x.source_id === c.source_id;
+    let prev = i - 1;
+    while (prev >= 0 && lead(shown[prev]) === lead(c)) prev--;
+    let next = i + 1;
+    while (next < shown.length && lead(shown[next]) === lead(c)) next++;
+    const same = (x) => x && srcOf(x) === srcOf(c);
     movable(row, {
       id: c.id,
-      group: `cat${c.source_id}`,
-      up: same(shown[i - 1]) ? () => before(c.id, shown[i - 1]) : null,
-      down: same(shown[i + 1]) ? () => before(shown[i + 1].id, c) : null,
+      group: `cat${srcOf(c)}`,
+      up: same(shown[prev]) ? () => before(c.id, shown[prev]) : null,
+      down: same(shown[next]) ? () => before(shown[next].id, c) : null,
       drop: (movedId) => before(movedId, c),
     });
   };
   // Category rows, under a heading per provider when the output has more than one source, even if
   // only one of them has rows here (say, the only one with movies). Rows come in source order, so
   // each provider's categories are together.
+  // A category combined into another source's group stays with that group, under its heading.
   const withGroups = (rows, render) => {
+    const leadSrc = new Map(cats.map((c) => [c.id, c.source_id]));
+    const srcOf = (c) => (c.group_lead ? leadSrc.get(c.group_lead) ?? c.source_id : c.source_id);
     const counts = new Map();
-    for (const c of rows) counts.set(c.source_id, (counts.get(c.source_id) || 0) + 1);
+    for (const c of rows) counts.set(srcOf(c), (counts.get(srcOf(c)) || 0) + 1);
     if (attachedIds().length < 2) return rows.map(render);
     const out = [];
     let last = null;
     for (const c of rows) {
-      if (c.source_id !== last) {
-        last = c.source_id;
-        const n = counts.get(c.source_id);
-        const src = draft.sources.find((x) => x.id === c.source_id);
+      if (srcOf(c) !== last) {
+        last = srcOf(c);
+        const n = counts.get(last);
+        const src = draft.sources.find((x) => x.id === last);
         out.push(h('div', { class: 'cat-group' },
-          h('span', null, h('b', null, sourceName(c.source_id)), h('span', { class: 'meta' }, ` · ${n} categor${n === 1 ? 'y' : 'ies'}${src ? affixNote(src) : ''}`)),
+          h('span', null, h('b', null, sourceName(last)), h('span', { class: 'meta' }, ` · ${n} categor${n === 1 ? 'y' : 'ies'}${src ? affixNote(src) : ''}`)),
           src ? h('button', { class: 'icon-btn', title: 'Category name prefix and suffix', onclick: () => editAffix(src) }, '✎') : null));
       }
       out.push(render(c));
@@ -1587,30 +1602,54 @@ async function outputEditor(main, id) {
     }
     summary.textContent = `${inc} of ${cats.length} categories · about ${chans} channels${dirty ? ' (preview)' : ''}`;
     const LIMIT = 500;
-    fill(catBox, 
-      ...withGroups(rows.slice(0, LIMIT), (c) => {
+    const shownRows = rows.slice(0, LIMIT);
+    // Per group on screen: its first and last row (the expander goes on the first, the list after the last).
+    const firstShown = new Map();
+    const lastShown = new Map();
+    for (const c of shownRows) {
+      if (!firstShown.has(c.group_lead)) firstShown.set(c.group_lead, c.id);
+      lastShown.set(c.group_lead, c.id);
+    }
+    fill(catBox,
+      ...withGroups(shownRows, (c) => {
         const st = evalCat(c);
+        const g = c.group_lead ?? c.id;
+        const combined = c.group_size > 1;
+        const host = firstShown.get(g) === c.id;
+        const follower = combined && c.id !== g;
         const seg = (label, val, cls) => h('button', { class: `${c.override === val ? 'on' : ''} ${cls}`, title: val ? `Always ${val}` : 'Follow the rules', onclick: () => setOverride([c.id], val) }, label);
-        const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'}` },
-          h('button', { class: 'expander', title: 'Show channels', onclick: () => { view.open.has(c.id) ? view.open.delete(c.id) : view.open.add(c.id); drawCats(); } }, view.open.has(c.id) ? '▾' : '▸'),
+        const row = h('div', { class: `cat-row ${st.included ? 'in' : 'out'} ${follower ? 'combined-row' : ''}` },
+          host
+            ? h('button', { class: 'expander', title: combined ? 'Show the channels of the combined group' : 'Show channels', onclick: () => { view.open.has(g) ? view.open.delete(g) : view.open.add(g); drawCats(); } }, view.open.has(g) ? '▾' : '▸')
+            : h('span', { class: 'expander-gap' }),
           h('span', { class: 'dot' }),
-          h('span', { class: 'cat-name' }, shownName(withAffix(c)), c.is_new ? badge('new', 'info') : null, jellyfinBadges(c),
+          h('span', { class: 'cat-name' }, shownName(withAffix(c)), c.is_new ? badge('new', 'info') : null,
+            combined && !follower ? badge(`combined · ${c.group_size} categories`, 'info') : null,
+            follower ? h('span', { class: 'meta' }, ` · from ${sourceName(c.source_id)}`) : null,
+            jellyfinBadges(c),
             c.channel_rules?.length ? badge(`${c.channel_rules.length} channel rule${c.channel_rules.length === 1 ? '' : 's'}`, 'info') : null,
             c.hide_empty ? badge('hides empty events', 'info') : null,
             c.hide_by_guide ? badge(c.hide_unlisted ? 'hides by guide + unlisted' : 'hides by guide', 'info') : null,
             h('span', { class: 'meta' }, ` · ${st.included && c.in_count != null && c.in_count < c.channel_count ? `${c.in_count}/` : ''}${c.channel_count} ch · ${reasonText(st)}`),
             hitLine(c)),
-          h('button', { class: 'icon-btn', title: 'Edit group (display name, Jellyfin category)', onclick: () => editCategory(c, drawCats) }, '✎'),
+          h('button', { class: 'icon-btn', title: 'Edit group (display name, Jellyfin category)', onclick: () => editCategory(c, reloadCats, { names: cats.map((x) => x.custom_name || x.clean_name || x.name) }) }, '✎'),
           h('span', { class: 'segmented small' }, seg('Auto', null, ''), seg('Include', 'include', 'inc'), seg('Exclude', 'exclude', 'exc')));
-        if (o.cat_sort === 'custom') arrangeCategory(row, c, cats, rows, drawCats);
-        if (!view.open.has(c.id)) return row;
-        return h('div', null, row, channelPanel(c));
+        if (o.cat_sort === 'custom' && host) arrangeCategory(row, c, cats, rows, drawCats);
+        if (!view.open.has(g) || lastShown.get(g) !== c.id) return row;
+        return h('div', null, row, channelPanel(cats.find((x) => x.id === g) || c));
       }),
       rows.length > LIMIT ? h('p', { class: 'meta pad' }, `Showing the first ${LIMIT} of ${rows.length}. Use the search box to narrow the list.`) : null,
       rows.length ? null : h('p', { class: 'meta pad' }, 'No categories to show.'));
     fill(hitNote, view.hitTotal > 200 && view.hitsQ === view.q.trim().toLowerCase()
       ? `Showing channel matches for the first 200 of ${view.hitTotal} channels. Type more to narrow it down.` : '');
     for (const p of panels.values()) markHits(p.el);
+  };
+
+  // After a rename: names decide which categories are combined, so the server regroups them.
+  const reloadCats = async () => {
+    cats = await api('GET', `/api/outputs/${id}/categories`);
+    for (const p of panels.values()) if (p.rerender) await loadPanel(p.cat, p);
+    drawCats();
   };
 
   // --- find a channel: matches across every category of this output, with their state
@@ -1620,11 +1659,12 @@ async function outputEditor(main, id) {
     const hits = channelHits(c);
     if (!hits.length) return null;
     const MAX = 6;
+    const g = c.group_lead ?? c.id;
     const open = () => {
-      view.open.add(c.id);
-      view.scrollTo = c.id;
+      view.open.add(g);
+      view.scrollTo = g;
       drawCats();
-      scrollToHit(c.id);
+      scrollToHit(g);
     };
     return h('span', { class: 'ch-hits' },
       hits.slice(0, MAX).map((m) => h('button', {
@@ -1670,8 +1710,9 @@ async function outputEditor(main, id) {
   // Expanded category: its channel rules plus the channel list. Panels are kept per
   // category and reused across redraws, reloading only when the category's state changes.
   const panels = new Map();
+  const members = (c) => cats.filter((x) => (x.group_lead ?? x.id) === (c.group_lead ?? c.id));
   const channelPanel = (c) => {
-    const key = `${c.override}|${c.included}`;
+    const key = members(c).map((x) => `${x.id}:${x.override}|${x.included}`).join(',');
     let p = panels.get(c.id);
     if (!p) {
       p = { el: h('div', { class: 'ch-panel' }, h('p', { class: 'meta' }, 'Loading…')), key, rules: [] };
@@ -1695,7 +1736,7 @@ async function outputEditor(main, id) {
     p.cat = c;
     const saveRules = async () => {
       await attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/channel-rules`, { rules: p.rules }));
-      c.channel_rules = p.rules.filter((r) => r.value !== '');
+      for (const m of members(c)) m.channel_rules = p.rules.filter((r) => r.value !== '');
       await loadPanel(c, p);
       refreshCounts();
       drawCats();
@@ -1752,7 +1793,13 @@ async function outputEditor(main, id) {
     });
 
     const included = chans.filter((ch) => ch.included).length;
-    if (!off) c.in_count = included;
+    const group = members(c);
+    const combined = group.length > 1;
+    for (const m of group) if (m.included) m.in_count = chans.filter((ch) => ch.category_id === m.id && ch.included).length;
+    const fromName = (ch) => {
+      const m = group.find((x) => x.id === ch.category_id);
+      return m ? `${sourceName(m.source_id)}: ${m.name}` : '';
+    };
     const overridden = chans.filter((ch) => ch.override).map((ch) => ch.id);
     const reason = (ch) => CH_REASONS[ch.reason] || '';
     const emptyCount = chans.filter((ch) => ch.is_empty_event).length;
@@ -1760,7 +1807,7 @@ async function outputEditor(main, id) {
     const unlistedCount = chans.filter((ch) => ch.is_unlisted).length;
     const setOption = async (key, on) => {
       await attempt(() => api('PUT', `/api/outputs/${id}/categories/${c.id}/options`, { [key]: on }));
-      c[key] = on;
+      for (const m of members(c)) m[key] = on;
       await loadPanel(c, p);
       refreshCounts();
       drawCats();
@@ -1768,11 +1815,14 @@ async function outputEditor(main, id) {
 
     p.el.classList.toggle('locked', off);
     fill(p.el,
+      combined ? h('p', { class: 'hint combined-note' },
+        `Combined group: ${group.length} categories with the same name, published as one. Their channels are listed and sorted together; `,
+        'channel rules, the hide options and the sort apply to all of them. Rename one to take it out of the group.') : null,
       off ? h('div', { class: 'ch-warning' },
-        h('span', null, h('b', null, 'This category is not in the output. '),
+        h('span', null, h('b', null, combined ? 'None of these categories is in the output. ' : 'This category is not in the output. '),
           'Include it to pick channels or use channel rules.',
           overridden.length ? ` Your ${overridden.length} earlier hand pick${overridden.length === 1 ? ' comes' : 's come'} back when you do.` : ''),
-        h('button', { class: 'btn small primary', onclick: () => setOverride([c.id], 'include') }, 'Include category')) : null,
+        h('button', { class: 'btn small primary', onclick: () => setOverride(group.map((m) => m.id), 'include') }, combined ? 'Include all of them' : 'Include category')) : null,
       h('div', { class: 'ch-option' },
         h('label', { class: 'check' },
           h('input', { type: 'checkbox', disabled: off, checked: data.hide_empty, onchange: (e) => setOption('hide_empty', e.target.checked) }),
@@ -1835,17 +1885,20 @@ async function outputEditor(main, id) {
         shownChans.map((ch, i) => {
           const name = ch.custom_name || ch.clean_name || ch.name;
           const why = !off && ch.reason !== 'category' ? reason(ch) : '';
+          const locked = off || !ch.category_included;
+          const from = combined ? h('span', { class: 'meta ch-from' }, ch.category_included ? fromName(ch) : `${fromName(ch)} (not in the output)`) : null;
           const now = ch.now_title ? h('span', { class: `now-title ${ch.is_guide_placeholder ? 'placeholder' : ''}`, title: `On now: ${ch.now_title}` }, `▸ ${ch.now_title}`)
             : ch.next ? h('span', { class: 'now-title', title: `Next: ${ch.next.title}, ${whenLocal(ch.next.start)}` }, `next ${whenLocal(ch.next.start)}: ${ch.next.title}`)
             : ch.is_unlisted ? h('span', { class: 'now-title placeholder', title: `Nothing in the guide for the next ${data.unlisted_hours} hours` }, `▸ nothing in the next ${data.unlisted_hours} h`) : null;
-          const row = h('label', { class: `ch-row ${ch.override && !off ? 'overridden' : ''} ${ch.included ? '' : 'out'}`, 'data-name': `${ch.name}\n${ch.custom_name || ''}`, title: off ? 'Include the category first' : [name, why].filter(Boolean).join('\n') },
-            h('input', { type: 'checkbox', disabled: off, checked: ch.included, onchange: (e) => setChannels([ch.id], e.target.checked ? 'include' : 'exclude') }),
+          const row = h('label', { class: `ch-row ${ch.override && !locked ? 'overridden' : ''} ${ch.included ? '' : 'out'}`, 'data-name': `${ch.name}\n${ch.custom_name || ''}`, title: locked ? 'Include the category first' : [name, why].filter(Boolean).join('\n') },
+            h('input', { type: 'checkbox', disabled: locked, checked: ch.included, onchange: (e) => setChannels([ch.id], e.target.checked ? 'include' : 'exclude') }),
             h('span', { class: 'ch-name' }, shownName(ch), ch.is_new ? [' ', badge('new', 'info')] : null),
-            now || why || (ch.override && !off)
+            now || why || from || (ch.override && !locked)
               ? h('span', { class: 'ch-details' },
+                from,
                 why ? h('span', { class: 'ch-why' }, why) : null,
                 now,
-                ch.override && !off ? h('button', { class: 'link', onclick: (e) => { e.preventDefault(); setChannels([ch.id], null); } }, 'reset') : null)
+                ch.override && !locked ? h('button', { class: 'link', onclick: (e) => { e.preventDefault(); setChannels([ch.id], null); } }, 'reset') : null)
               : null);
           if (custom) {
             movable(row, {

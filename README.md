@@ -280,9 +280,10 @@ Xtream Codes login. Above the category list:
 
 - **Sort categories** puts the categories of each source in provider order, by name, or in a
   **Custom** order you arrange with the ⠿ handle or the ↑/↓ buttons. Sources stay in their own
-  groups, in the order they're listed on the output.
+  groups, in the order they're listed on the output (a category combined into another source's
+  group goes with that group).
 - **Sort channels** does the same for the channels of every category. Channels stay inside their
-  category.
+  category, or their combined group.
 
 Expand a category to give it its own **Sort**, which overrides **Sort channels** for that category.
 A custom channel list shows as one column. Custom starts from the order on screen, and with
@@ -291,6 +292,17 @@ the provider adds later goes to the end, flagged **new**, and nothing else moves
 
 Sorting by name uses the names players see, after name cleanup and with any source prefix or
 suffix. Filter rules aren't affected: they still match the provider's names.
+
+### Combining categories
+
+Live TV categories that players would see under the same name (ignoring case) are combined into
+one group in that output, even across sources: one group in the playlist, the guide, the Xtream
+Codes login and Watch. To combine two, give them the same display name with ✎ (the name box
+suggests the names already in use). To keep them apart, rename one, or give their sources
+different prefixes. The group sits where its first category is, and the others are listed right
+under it, each still included or excluded on its own. Expand the group to see all its channels in
+one list, with where each comes from. Its **Sort** (by name or Custom, across all of them), channel
+rules and hide options apply to every category in it. Movie and series categories aren't combined.
 
 ### How filtering decides
 
